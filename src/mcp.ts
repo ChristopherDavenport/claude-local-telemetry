@@ -80,11 +80,27 @@ export const TOOLS: Tool[] = [
     }),
   },
   {
+    name: "telemetry_traces",
+    description:
+      "Traces most recent first, with root span name, span count and duration. The " +
+      "index to pick a trace_id from before calling telemetry_trace.",
+    inputSchema: obj({ since: S, session_id: S, limit: I }),
+    run: (db, a) => Q.traces(db, {
+      since: a["since"] as string, sessionId: a["session_id"] as string,
+      limit: a["limit"] as number,
+    }),
+  },
+  {
     name: "telemetry_trace",
-    description: "The span tree for one trace, or the latest trace of a session.",
-    inputSchema: obj({ trace_id: S, session_id: S }),
+    description:
+      "The observability tree for one trace, or the latest trace of a session: nested " +
+      "spans with the session's events woven in by time. A session with no spans " +
+      "returns its events as a flat tree, which is the normal case unless the beta " +
+      "trace exporter is on.",
+    inputSchema: obj({ trace_id: S, session_id: S, events: B }),
     run: (db, a) => Q.trace(db, {
       traceId: a["trace_id"] as string, sessionId: a["session_id"] as string,
+      includeEvents: a["events"] as boolean,
     }),
   },
   {

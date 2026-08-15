@@ -63,15 +63,74 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 is why the receiver is `node:http` and nothing else instead of a collector
 deployment. With `grpc` or `http/protobuf` this would need one.
 
+## Look at it
+
+A dashboard, for the questions telemetry answers better as a picture than as
+prose: cost over time, cache-ratio trend, and a session drilldown you scan
+rather than query.
+
+```sh
+npm --prefix ui install     # once
+npm run ui:build            # emits ui/dist
+node src/cli.ts api --ui ui/dist
+```
+
+Then open <http://127.0.0.1:4319>. For development, run the API and Vite side by
+side — the dev server proxies `/api` to port 4319, so the request path is the
+same in both modes:
+
+```sh
+node src/cli.ts api &
+npm run ui:dev
+```
+
+Eight views — overview, cost, sessions, traces, tool audit, plugins, hook health,
+and a query builder — over the same ten HTTP routes. The builder is the
+interesting one: pick a table, a calculation and a breakdown, then click a bar
+to drill into a session and its trace. The whole query lives in the URL, so a
+result is a link you can paste into an issue. It also has a raw `SELECT` box,
+behind the same read-only guard the MCP server uses.
+
+## The observability tree
+
+`/traces` lists traces; opening one renders nested spans **with the session's
+events woven in** — spans as bars with a duration, events as instants at the
+point they fired.
+
+Events carry no parent pointer, so they are placed by time containment: each
+lands in the *narrowest* span covering it, which is the deepest one. Anything
+covered by no span stays at the top level rather than being dropped.
+
+The useful consequence is that a session with **no spans at all** still renders
+a tree, from its events alone. That is the normal case — spans need
+`CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1` and no backfilled transcript has ever
+contained one — so the trace surface is worth something before you turn the beta
+exporter on, and says which case you are looking at.
+
+It is **Lit + the [Jack Henry Design System](https://jackhenry.design/v2)**
+(`@jack-henry/jh-ui`, public npm, Apache-2.0), routed with `@lit-labs/router`
+and built by Vite. The design system ships no table or chart component, so
+those are built here from `jh-core` tokens; the four-series palette is checked
+for colour-blind separation and contrast in both light and dark rather than
+picked by eye. Theme follows the OS setting.
+
+Nothing on the page talks to anything but this API — no fonts, no CDN, no
+analytics. The store holds prompts and tool inputs.
+
 ## Ask it things
 
-The MCP server exposes nine read-only tools — `telemetry_overview`,
+The MCP server exposes ten read-only tools — `telemetry_overview`,
 `telemetry_cost`, `telemetry_sessions`, `telemetry_tool_audit`,
-`telemetry_trace`, `telemetry_plugin_costs`, `telemetry_hook_health`,
-`telemetry_run_query`, and `telemetry_sql`.
+`telemetry_traces`, `telemetry_trace`, `telemetry_plugin_costs`,
+`telemetry_hook_health`, `telemetry_run_query`, and `telemetry_sql`.
 
 Start with `telemetry_overview`; it reports what is in the store and over what
 period, which determines whether a question is answerable at all.
+
+Every tool has an HTTP route of the same name, and both call the same function
+in `queries.ts`. That parity is deliberate: when the dashboard could not run raw
+SQL but Claude could, there were questions answerable in one interface and not
+the other, which is exactly the drift a shared query module exists to prevent.
 
 ## Two sources, because neither is enough
 

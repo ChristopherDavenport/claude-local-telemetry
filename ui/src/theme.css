@@ -1,0 +1,100 @@
+/**
+ * Theme and app-level tokens.
+ *
+ * jh-core ships its two themes with *different* selectors — `jh-theme-light.css`
+ * targets `:root`, `jh-theme-dark.css` targets `.jh-theme-dark`. So they can be
+ * imported side by side with no media query and no cascade fight: dark applies
+ * only when the class is present.
+ *
+ * That is what `theme.ts` does, from `prefers-color-scheme`. Doing it in script
+ * rather than CSS is forced — CSS cannot add a class — but it is also the better
+ * outcome, because the same switch accepts a manual override later without
+ * rewriting a generated file's selectors.
+ *
+ * Fonts are deliberately not loaded. The family tokens already carry a fallback
+ * chain (Roboto → Helvetica → Arial → sans-serif), and this page renders a store
+ * that contains prompts and tool inputs — it should make no network request that
+ * isn't to its own API.
+ */
+
+@import "@jack-henry/jh-core/platforms/web/css/jh-theme-light.css";
+@import "@jack-henry/jh-core/platforms/web/css/jh-theme-dark.css";
+
+:root {
+  /* ---------------------------------------------------------------- *
+   * Categorical series palette.
+   *
+   * Four fixed slots — input, output, cache-read, cache-creation — in a
+   * fixed order, never cycled. Both modes are steps chosen from the same
+   * jh-core ramps (mint, azure, orange, magenta) and both were checked with
+   * the validator rather than by eye:
+   *
+   *   light  on #FFFFFF  worst adjacent CVD ΔE 19.8 (deutan), all checks pass
+   *   dark   on #2A2C2E  worst adjacent CVD ΔE 21.2 (deutan), all checks pass
+   *
+   * The global ramp tokens hold identical values in both theme files, so
+   * these references resolve to exactly the hexes that were validated.
+   * ---------------------------------------------------------------- */
+  --tl-series-1: var(--jh-color-mint-500);     /* #07865B  input        */
+  --tl-series-2: var(--jh-color-azure-600);    /* #085CE5  output       */
+  --tl-series-3: var(--jh-color-orange-500);   /* #A4670C  cache read   */
+  --tl-series-4: var(--jh-color-magenta-600);  /* #B11A9D  cache create */
+
+  /* Magnitude, not identity: one hue. Used by the breakdown bars, where the
+   * category is already named on the axis. */
+  --tl-sequential: var(--jh-color-azure-600);
+  --tl-sequential-soft: var(--jh-color-azure-200);
+
+  --tl-grid: var(--jh-color-divider-secondary);
+  --tl-axis-ink: var(--jh-color-content-secondary-enabled);
+
+  --tl-gap: var(--jh-size-400);
+  --tl-radius: var(--jh-border-radius-200);
+  --tl-max-width: 1440px;
+
+  color-scheme: light;
+}
+
+/* Dark is a re-selection from the same ramps at the lightness the dark surface
+ * needs (OKLCH L 0.48–0.67), not a flip of the light values. */
+.jh-theme-dark {
+  --tl-series-1: var(--jh-color-mint-400);     /* #14AD77 */
+  --tl-series-2: var(--jh-color-azure-450);    /* #4A8AFB */
+  --tl-series-3: var(--jh-color-orange-450);   /* #BF7A17 */
+  --tl-series-4: var(--jh-color-magenta-450);  /* #E547CD */
+
+  --tl-sequential: var(--jh-color-azure-450);
+  --tl-sequential-soft: var(--jh-color-azure-700);
+
+  /* Tells the UA to render scrollbars and form controls dark too; without it
+   * the scrollbar stays light against a dark page. */
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--jh-color-container-page);
+  color: var(--jh-color-content-primary-enabled);
+  font-family: var(--jh-font-family-primary);
+  font-size: var(--jh-font-size-400);
+  line-height: var(--jh-font-line-height-600);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The app renders nothing until its module loads. Without this the page flashes
+ * an unstyled block before the shell upgrades. */
+tl-app:not(:defined) {
+  display: block;
+  min-height: 100vh;
+}
+
+:focus-visible {
+  outline: 2px solid var(--jh-color-interactive-focus-outer);
+  outline-offset: 2px;
+}

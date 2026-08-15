@@ -34,3 +34,24 @@ jobs:
         run: npm test
       - name: Typecheck
         run: npm run typecheck
+
+  ui:
+    # One OS is enough here. The matrix above earns its cost on shell builtins
+    # that differ between BSD and GNU; a Vite build has no such surface.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # `npm ci`, not `npm install`, so this also asserts the lockfile is honest.
+      # ui/.npmrc pins @jack-henry to public npm; without it this step resolves
+      # a different registry than a Jack Henry laptop does, which is the whole
+      # reason that file exists.
+      - run: npm ci --no-audit --no-fund
+      # `build` is `tsc --noEmit && vite build` — typecheck and bundle in one.
+      - name: Typecheck and build
+        run: npm run build
