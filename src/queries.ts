@@ -121,39 +121,197 @@ export function toolAudit(db: DatabaseSync, o: {
   return { summary, rows };
 }
 
-export function trace(db: DatabaseSync, o: { traceId?: string | undefined; sessionId?: string | undefined }) {
-  let traceId = o.traceId;
+/**
+ * One node of an assembled trace. Spans nest; events are leaves placed inside
+ * the span that was running when they were emitted.
+ *
+ * `kind` is a discriminant rather than two parallel arrays because the point of
+ * the tree is the interleaving — an event's position relative to its sibling
+ * spans is the information.
+ */
+export type TraceNode =
+  | {
+    kind: "span";
+    span_id: string;
+    parent_id: string | null;
+    name: string;
+    ts: string;
+    duration_ms: number | null;
+    attrs: Row;
+    children: TraceNode[];
+  }
+  | { kind: "event"; name: string; ts: string; source: string; attrs: Row; children: [] };
+
+/** Events are unbounded per session; a trace view is not a log viewer. */
+const EVENT_CAP = 500;
+
+/** ISO-8601 UTC text to epoch ms. The store writes `Z`; be tolerant anyway. */
+function epoch(ts: string): number {
+  const n = Date.parse(/[Z+]|[-]\d\d:\d\d$/.test(ts) ? ts : `${ts}Z`);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+/**
+ * The observability tree for one trace: nested spans, with the session's events
+ * woven in at the point they occurred.
+ *
+ * Events carry no parent pointer — OTel logs and transcript records are not
+ * spans — so they are placed by time containment: each lands in the *narrowest*
+ * span whose window covers it, which is the deepest one. Anything outside every
+ * span stays at the top level rather than being dropped, so the tree never
+ * silently loses a record.
+ *
+ * A session with no spans still returns its events as a flat tree. That is the
+ * normal case: spans need `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`, and no
+ * transcript has ever contained one. Returning nothing would make the feature
+ * look broken when the data is merely a different shape.
+ */
+export function trace(db: DatabaseSync, o: {
+  traceId?: string | undefined;
+  sessionId?: string | undefined;
+  includeEvents?: boolean | undefined;
+}) {
+  let traceId = o.traceId ?? null;
+  let sessionId = o.sessionId ?? null;
   if (!traceId) {
-    if (!o.sessionId) throw new Error("pass traceId or sessionId");
+    if (!sessionId) throw new Error("pass traceId or sessionId");
     const r = db.prepare(
       "SELECT trace_id FROM spans WHERE session_id=? ORDER BY ts DESC LIMIT 1",
-    ).get(o.sessionId) as { trace_id: string } | undefined;
-    if (!r) {
-      return {
-        spans: [], note:
-          "no spans for that session — traces are a beta exporter and off unless " +
-          "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1",
-      };
-    }
-    traceId = r.trace_id;
+    ).get(sessionId) as { trace_id: string } | undefined;
+    traceId = r?.trace_id ?? null;
   }
-  const spans = db.prepare(
-    "SELECT span_id, parent_id, name, ts, duration_ms, attrs FROM spans" +
-    " WHERE trace_id=? ORDER BY ts",
-  ).all(traceId) as Array<Row & { span_id: string; parent_id: string | null; attrs: string }>;
 
+  const spans = traceId
+    ? db.prepare(
+      "SELECT span_id, parent_id, trace_id, name, ts, duration_ms, session_id, attrs" +
+      " FROM spans WHERE trace_id=? ORDER BY ts",
+    ).all(traceId) as Array<{
+      span_id: string; parent_id: string | null; trace_id: string; name: string;
+      ts: string; duration_ms: number | null; session_id: string | null; attrs: string;
+    }>
+    : [];
+
+  if (!sessionId) sessionId = spans.find((s) => s.session_id)?.session_id ?? null;
+
+  // Bound events to the trace's own window when there are spans; otherwise the
+  // whole session, because then the events *are* the trace.
+  let events: Array<{ ts: string; name: string; attrs: string; source: string }> = [];
+  if (o.includeEvents !== false && sessionId) {
+    const clauses = ["session_id = ?"];
+    const params: unknown[] = [sessionId];
+    if (spans.length) {
+      const lo = Math.min(...spans.map((s) => epoch(s.ts)));
+      const hi = Math.max(...spans.map((s) => epoch(s.ts) + (s.duration_ms ?? 0)));
+      clauses.push("ts >= ?", "ts <= ?");
+      params.push(new Date(lo).toISOString(), new Date(hi).toISOString());
+    }
+    events = db.prepare(
+      `SELECT ts, name, attrs, source FROM events WHERE ${clauses.join(" AND ")}` +
+      ` ORDER BY ts LIMIT ${EVENT_CAP}`,
+    ).all(...params as never[]) as typeof events;
+  }
+
+  // Place each event in the narrowest covering span.
+  const windows = spans.map((s) => ({
+    id: s.span_id,
+    lo: epoch(s.ts),
+    hi: epoch(s.ts) + (s.duration_ms ?? 0),
+    width: s.duration_ms ?? 0,
+  }));
+  const eventsBySpan = new Map<string, TraceNode[]>();
+  const rootEvents: TraceNode[] = [];
+  for (const e of events) {
+    const at = epoch(e.ts);
+    let best: (typeof windows)[number] | null = null;
+    for (const w of windows) {
+      if (at < w.lo || at > w.hi) continue;
+      if (!best || w.width < best.width) best = w;
+    }
+    const node: TraceNode = {
+      kind: "event", name: e.name, ts: e.ts, source: e.source,
+      attrs: JSON.parse(e.attrs) as Row, children: [],
+    };
+    if (best) {
+      if (!eventsBySpan.has(best.id)) eventsBySpan.set(best.id, []);
+      eventsBySpan.get(best.id)!.push(node);
+    } else {
+      rootEvents.push(node);
+    }
+  }
+
+  const known = new Set(spans.map((s) => s.span_id));
   const byParent = new Map<string | null, typeof spans>();
   for (const s of spans) {
-    const k = s.parent_id ?? null;
+    // A parent outside this trace would orphan the subtree; hoist it to the root
+    // instead of dropping it.
+    const k = s.parent_id && known.has(s.parent_id) ? s.parent_id : null;
     if (!byParent.has(k)) byParent.set(k, []);
     byParent.get(k)!.push(s);
   }
-  const build = (pid: string | null): Row[] =>
-    (byParent.get(pid) ?? []).map((s) => ({
-      name: s["name"], duration_ms: s["duration_ms"], ts: s["ts"],
-      attrs: JSON.parse(s.attrs) as Row, children: build(s.span_id),
+
+  const byTime = (a: TraceNode, b: TraceNode) => epoch(a.ts) - epoch(b.ts);
+  const build = (pid: string | null): TraceNode[] =>
+    (byParent.get(pid) ?? []).map((s): TraceNode => ({
+      kind: "span",
+      span_id: s.span_id,
+      parent_id: s.parent_id,
+      name: s.name,
+      ts: s.ts,
+      duration_ms: s.duration_ms,
+      attrs: JSON.parse(s.attrs) as Row,
+      children: [...build(s.span_id), ...(eventsBySpan.get(s.span_id) ?? [])].sort(byTime),
     }));
-  return { traceId, spanCount: spans.length, tree: build(null) };
+
+  const tree = [...build(null), ...rootEvents].sort(byTime);
+
+  return {
+    traceId,
+    sessionId,
+    spanCount: spans.length,
+    eventCount: events.length,
+    truncatedEvents: events.length === EVENT_CAP,
+    tree,
+    ...(spans.length ? {} : {
+      note:
+        "no spans for this session — traces are a beta exporter and off unless " +
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1. Showing the session's events instead; " +
+        "they carry no parentage, so the tree is flat.",
+    }),
+  };
+}
+
+/**
+ * Traces, most recent first — the index the trace view drills in from.
+ *
+ * Duration comes from the root span rather than `max(duration_ms)`: the root is
+ * the one span that by definition spans the whole trace, and a long child of a
+ * short parent is a clock-skew artefact rather than a longer trace.
+ */
+export function traces(db: DatabaseSync, o: {
+  since?: string | undefined; sessionId?: string | undefined; limit?: number | undefined;
+} = {}) {
+  const where = ["1=1"]; const params: unknown[] = [];
+  if (o.since) { where.push("s.ts >= ?"); params.push(o.since); }
+  if (o.sessionId) { where.push("s.session_id = ?"); params.push(o.sessionId); }
+  const limit = o.limit ?? 50;
+  const sql =
+    "SELECT s.trace_id, min(s.ts) AS started_at, count(*) AS span_count," +
+    " max(s.session_id) AS session_id," +
+    " (SELECT r.name FROM spans r WHERE r.trace_id = s.trace_id AND r.parent_id IS NULL" +
+    "   ORDER BY r.ts LIMIT 1) AS root_name," +
+    " COALESCE((SELECT r.duration_ms FROM spans r WHERE r.trace_id = s.trace_id" +
+    "   AND r.parent_id IS NULL ORDER BY r.ts LIMIT 1), max(s.duration_ms)) AS duration_ms" +
+    ` FROM spans s WHERE ${where.join(" AND ")}` +
+    " GROUP BY s.trace_id ORDER BY started_at DESC LIMIT ?";
+  const rows = all(db, sql, [...params, limit], limit);
+  return {
+    rows,
+    note: rows.length ? undefined : (
+      "no spans in the store. Traces come only from the OTLP sink with " +
+      "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1; backfilled transcripts contain none. " +
+      "Session event timelines are still available via trace(sessionId)."
+    ),
+  };
 }
 
 export function runQuery(db: DatabaseSync, o: {

@@ -43,13 +43,24 @@ function routes(dbPath?: string): Record<string, Handler> {
       since: s(p.get("since")), limit: num(p.get("limit")),
       ...(p.get("success") == null ? {} : { success: p.get("success") === "true" }),
     }))(),
+    "/api/traces": (p) => withDb((db) => Q.traces(db, {
+      since: s(p.get("since")), sessionId: s(p.get("session_id")), limit: num(p.get("limit")),
+    }))(),
     "/api/trace": (p) => withDb((db) => Q.trace(db, {
       traceId: s(p.get("trace_id")), sessionId: s(p.get("session_id")),
+      ...(p.get("events") == null ? {} : { includeEvents: p.get("events") !== "false" }),
     }))(),
     "/api/query": (p) => withDb((db) => Q.runQuery(db, {
       table: s(p.get("table")), calculate: s(p.get("calculate")),
       breakdown: s(p.get("breakdown")), where: s(p.get("where")),
       since: s(p.get("since")), until: s(p.get("until")), limit: num(p.get("limit")),
+    }))(),
+    // The one query surface the MCP server had and this did not. `sql()` applies
+    // the same read-only guard for both callers — a single SELECT, no statement
+    // separators, no DDL — so routing it here closes the asymmetry rather than
+    // opening a new hole.
+    "/api/sql": (p) => withDb((db) => Q.sql(db, {
+      query: s(p.get("query")), limit: num(p.get("limit")),
     }))(),
     "/api/plugins": withDb((db) => Q.pluginCosts(db)),
     "/api/hooks": (p) => withDb((db) => Q.hookHealth(db, {

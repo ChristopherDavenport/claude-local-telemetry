@@ -18,7 +18,7 @@ import { join } from "node:path";
 
 import { init, openForRead, stats, TABLES } from "../src/store.ts";
 import { backfill } from "../src/backfill.ts";
-import { handleLogs } from "../src/sink.ts";
+import { handleLogs, handleTraces } from "../src/sink.ts";
 import * as Q from "../src/queries.ts";
 import { dispatch, TOOLS } from "../src/mcp.ts";
 
@@ -229,6 +229,7 @@ test("every query returns and stays a reasonable size", () => {
       runQuery: () => Q.runQuery(d, { calculate: "sum_input", breakdown: "model" }),
       pluginCosts: () => Q.pluginCosts(d),
       hookHealth: () => Q.hookHealth(d),
+      traces: () => Q.traces(d),
     })) {
       const size = JSON.stringify(fn()).length;
       assert.ok(size > 0, `${name} returned nothing`);
@@ -279,4 +280,120 @@ test("stats reports source breakdown so the cost gap is visible", () => {
   const s = q((d) => stats(d));
   assert.ok(Object.keys(s.bySource).length > 0);
   assert.ok(s.rows["api_requests"]! > 0);
+});
+
+/* ------------------------------------------------------------------ *
+ * Traces.
+ *
+ * Its own store, because event placement is asserted by position and the
+ * shared fixture's events would move the answers.
+ * ------------------------------------------------------------------ */
+
+const TSID = "trace-session";
+const NS = 1_755_280_000_000_000_000; // base instant, nanoseconds
+const at = (secs: number) => String(NS + secs * 1_000_000_000);
+
+function traceStore(): string {
+  const path = join(work, "trace.db");
+  const d = init(path);
+  const span = (id: string, parent: string | null, name: string, from: number, to: number) => ({
+    traceId: "trace-1", spanId: id, ...(parent ? { parentSpanId: parent } : {}),
+    name, startTimeUnixNano: at(from), endTimeUnixNano: at(to),
+    attributes: [{ key: "session.id", value: { stringValue: TSID } }],
+  });
+  handleTraces(d, { resourceSpans: [{ scopeSpans: [{ spans: [
+    span("a", null, "root.a", 0, 3),
+    span("b", "a", "child.b", 1, 2),
+    span("c", null, "root.c", 6, 8),
+  ] }] }] });
+
+  const ev = (name: string, secs: number) => ({
+    timeUnixNano: at(secs),
+    attributes: [
+      { key: "event.name", value: { stringValue: name } },
+      { key: "session.id", value: { stringValue: TSID } },
+    ],
+  });
+  handleLogs(d, { resourceLogs: [{ scopeLogs: [{ logRecords: [
+    ev("in_child", 1.5),   // narrowest cover is b
+    ev("in_root", 2.5),    // only a covers it
+    ev("in_gap", 4),       // inside the trace window, inside no span
+    ev("way_after", 30),   // outside the window entirely
+  ] }] }] });
+  d.close();
+  return path;
+}
+
+test("the trace tree nests spans and places events in the narrowest one", () => {
+  const path = traceStore();
+  const d = openForRead(path);
+  const t = Q.trace(d, { traceId: "trace-1" });
+  d.close();
+
+  assert.equal(t.spanCount, 3);
+  const roots = t.tree;
+  // Two root spans plus the gap event, ordered by time.
+  assert.deepEqual(roots.map((n) => n.name), ["root.a", "in_gap", "root.c"]);
+  assert.equal(roots[1]!.kind, "event", "an event covered by no span stays at the top level");
+
+  const a = roots[0]!;
+  assert.equal(a.kind, "span");
+  assert.equal(a.kind === "span" && a.span_id, "a");
+  assert.equal(a.kind === "span" && a.parent_id, null);
+  // child.b at 1s sorts before in_root at 2.5s.
+  assert.deepEqual(a.children.map((n) => n.name), ["child.b", "in_root"]);
+
+  const b = a.children[0]!;
+  assert.equal(b.kind === "span" && b.parent_id, "a", "parent_id is exposed, not just implied");
+  assert.deepEqual(b.children.map((n) => n.name), ["in_child"],
+    "the event lands in the narrowest covering span, not the outermost");
+
+  // Bounded to the trace's own window.
+  assert.equal(t.eventCount, 3);
+  assert.ok(!JSON.stringify(t.tree).includes("way_after"));
+});
+
+test("a session with no spans still returns an event tree", () => {
+  const path = traceStore();
+  const d = openForRead(path);
+  const t = Q.trace(d, { sessionId: "no-such-session" });
+  const own = Q.trace(d, { sessionId: TSID });
+  d.close();
+
+  assert.equal(t.spanCount, 0);
+  assert.equal(t.tree.length, 0);
+  assert.match(t.note ?? "", /beta exporter/);
+
+  // The real session resolves to its trace and keeps the spans.
+  assert.equal(own.traceId, "trace-1");
+  assert.equal(own.spanCount, 3);
+});
+
+test("events are omitted when asked", () => {
+  const path = traceStore();
+  const d = openForRead(path);
+  const t = Q.trace(d, { traceId: "trace-1", includeEvents: false });
+  d.close();
+  assert.equal(t.eventCount, 0);
+  assert.deepEqual(t.tree.map((n) => n.name), ["root.a", "root.c"]);
+});
+
+test("the traces index lists roots, newest first", () => {
+  const path = traceStore();
+  const d = openForRead(path);
+  const list = Q.traces(d);
+  const empty = Q.traces(d, { sessionId: "nobody" });
+  d.close();
+
+  assert.equal(list.rows.length, 1);
+  const row = list.rows[0] as Record<string, unknown>;
+  assert.equal(row["trace_id"], "trace-1");
+  assert.equal(row["span_count"], 3);
+  assert.equal(row["session_id"], TSID);
+  // Root name and duration come from a root span, not from max(duration).
+  assert.ok(["root.a", "root.c"].includes(row["root_name"] as string));
+  assert.equal(row["duration_ms"], 3000);
+
+  assert.equal(empty.rows.length, 0);
+  assert.match(empty.note ?? "", /only from the OTLP sink/);
 });
