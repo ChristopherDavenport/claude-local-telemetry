@@ -29,10 +29,9 @@
     "typescript": "^5.7.0"
   },
   "files": [
-    "dist",
+    "dist/**/*.js",
     "skills",
     ".claude-plugin",
-    "src",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

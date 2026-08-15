@@ -67,9 +67,18 @@ public. Both are.
 
 ## What ships
 
-`files` in `package.json` limits the tarball to `dist`, `src`, `skills`,
-`.claude-plugin`, and the three top-level docs. `src` is included because the
-emitted source maps reference it.
+`files` limits the tarball to `dist/**/*.js`, `skills`, `.claude-plugin` and the
+three top-level docs — 13 files, 28 KB.
+
+No declarations, no source maps, no `src`. This is a CLI: `package.json`
+declares a `bin` and no `main`/`exports`, so nothing is importable and `.d.ts`
+files would describe an API no consumer can reach. The programmatic interface is
+`api.ts` over HTTP, which is how the dashboard consumes it and how anything else
+can. Adding a module export would be a second, redundant surface plus a semver
+commitment on `queries.ts`.
+
+Source maps went with them: they are only useful alongside `src/`, and the two
+together were 55% of a tarball for a tool normally run from a clone.
 
 Note that npm is not how the Claude Code plugin is consumed — that goes through
 the marketplace, which clones this repo and runs `src/cli.ts` directly. Type
