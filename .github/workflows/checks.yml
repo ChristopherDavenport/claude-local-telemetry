@@ -1,0 +1,34 @@
+name: checks
+
+# Deterministic and free — no model, no network, no dependency on a real
+# ~/.claude/projects — so it runs on every push rather than on demand.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assertions:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, deliberately. The first bug CI ever caught here was `mktemp -t`,
+        # a BSD spelling that GNU rejects — green on macOS, broken on Linux.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Suite
+        run: ./evals/run.sh
+      - name: Mutation check
+        run: ./evals/run.sh --mutate
+      - name: Scripts compile
+        run: python3 -m compileall -q scripts evals
