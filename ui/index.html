@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>claude-local-telemetry</title>
+    <meta
+      name="description"
+      content="Local observability for Claude Code: cost, tool audit, hook health and traces from a SQLite store."
+    />
+    <!-- Nothing here reaches the network beyond this origin. The store holds
+         prompts and tool inputs, so no analytics, no fonts, no CDN. -->
+  </head>
+  <body>
+    <tl-app></tl-app>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
