@@ -16,9 +16,10 @@ store and an MCP server queries it:
 
 | Piece | What it does |
 |---|---|
-| `sink.py` | OTLP/HTTP-JSON receiver. Live metrics, events, spans. **The only source of `cost_usd`.** |
-| `backfill.py` | Imports `~/.claude/projects/**/*.jsonl`. Months of history, exact tokens, **no cost**. |
-| `mcp_server.py` | The `telemetry_*` tools. Read-only. |
+| `sink` | OTLP/HTTP-JSON receiver. Live metrics, events, spans. **The only source of `cost_usd`.** |
+| `backfill` | Imports `~/.claude/projects/**/*.jsonl`. Months of history, exact tokens, **no cost**. |
+| `mcp` | The `telemetry_*` tools. Read-only. |
+| `api` | Same queries over HTTP, for the dashboard. |
 
 ## Use the MCP tools
 
@@ -59,14 +60,14 @@ own plugins actually fire.
 Backfill is immediate and needs nothing running:
 
 ```sh
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.py
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/store.py --stats
+node ${CLAUDE_PLUGIN_ROOT}/src/cli.ts backfill
+node ${CLAUDE_PLUGIN_ROOT}/src/cli.ts stats
 ```
 
 For live collection, start the sink and point Claude Code at it:
 
 ```sh
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sink.py &
+node ${CLAUDE_PLUGIN_ROOT}/src/cli.ts sink &
 
 export CLAUDE_CODE_ENABLE_TELEMETRY=1
 export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # traces; beta, off by default
@@ -76,8 +77,8 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 ```
 
 Put the exports in `~/.claude/settings.json` under `env` to avoid editing a
-shell profile. `http/json` is what makes the sink stdlib-only — with `grpc` or
-`http/protobuf` it would need a collector.
+shell profile. `http/json` is what makes the sink dependency-free — with `grpc` or
+`http/protobuf` it would need a collector. Requires Node 24 for `node:sqlite`.
 
 The database lives at `~/.claude/telemetry/telemetry.db`, overridable with
 `CLAUDE_TELEMETRY_DB`.

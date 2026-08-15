@@ -5,8 +5,10 @@ sink, a transcript backfill, and an MCP server over one SQLite file — so you c
 ask what your sessions cost, what tools ran, and whether your hooks are actually
 firing, without sending telemetry anywhere.
 
-No collector. No protobuf. No Docker. No dependencies beyond the Python standard
-library.
+No collector. No protobuf. No Docker. No dependencies and no build step —
+TypeScript on Node 24, which ships `node:sqlite` and runs `.ts` files directly.
+
+Requires **Node 24+** (for `node:sqlite` and TypeScript type-stripping).
 
 ## Install
 
@@ -17,7 +19,8 @@ As a Claude Code plugin:
 /plugin install claude-telemetry@christopherdavenport
 ```
 
-Or clone and run the scripts directly — they have no install step.
+Or clone it. Node 24 is the only requirement; there is nothing to install and
+nothing to build.
 
 ## Start with history you already have
 
@@ -25,8 +28,15 @@ Every Claude Code session has been writing a transcript to
 `~/.claude/projects/`. Import them and the store is useful immediately:
 
 ```sh
-python3 scripts/backfill.py
-python3 scripts/store.py --stats
+npx claude-telemetry backfill
+npx claude-telemetry stats
+```
+
+Or from a clone, with no install at all — Node 24 runs the TypeScript directly:
+
+```sh
+node src/cli.ts backfill
+node src/cli.ts stats
 ```
 
 On the machine this was built for that was 608 transcripts, 23,000 API requests
@@ -36,7 +46,7 @@ deduplicates on a natural key.
 ## Collect live sessions
 
 ```sh
-python3 scripts/sink.py &
+node src/cli.ts sink &
 ```
 
 Then point Claude Code at it, ideally via `env` in `~/.claude/settings.json`:
@@ -50,7 +60,8 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 ```
 
 `http/json` is the load-bearing setting. It makes the payloads plain JSON, which
-is why the receiver is ~200 lines of stdlib instead of a collector deployment.
+is why the receiver is `node:http` and nothing else instead of a collector
+deployment. With `grpc` or `http/protobuf` this would need one.
 
 ## Ask it things
 
@@ -64,7 +75,7 @@ period, which determines whether a question is answerable at all.
 
 ## Two sources, because neither is enough
 
-|  | OTel (`sink.py`) | Transcripts (`backfill.py`) |
+|  | OTel (`sink`) | Transcripts (`backfill`) |
 |---|---|---|
 | `cost_usd` | **yes** | no — not recorded |
 | Token counts | yes | yes, exact |
@@ -106,18 +117,22 @@ three covering indexes; the whole query surface over a month of data is 82ms.
 ClickHouse is built for three orders of magnitude more than this and would
 reintroduce the daemon, port and config that `http/json` let us avoid. If
 team-wide aggregation ever happens, revisit it — both collectors write through
-`store.py` rather than inlining SQL, so a backend change is a re-import.
+`store.ts` rather than inlining SQL, so a backend change is a re-import.
 
 ## Tests
 
 ```sh
-./evals/run.sh            # 20 assertions, deterministic, free
-./evals/run.sh --mutate   # proves the suite can fail
+npm test          # 16 assertions, deterministic, free
+npm run typecheck # tsc --noEmit; strict, with exactOptionalPropertyTypes
 ```
 
 No model, no network, no dependency on your real `~/.claude/projects`. Synthetic
 fixtures cover the edge cases worth pinning: an all-zero usage record, a tool
-call with no result, a repeated `requestId`, a hook run that errors.
+call with no result, a repeated `requestId`, a nested OTLP attribute, and a hook
+run that errors.
+
+CI runs Linux and macOS both. The first bug it ever caught was a BSD-only
+`mktemp` spelling that GNU rejects — green on one, silently broken on the other.
 
 ## Cautions
 
