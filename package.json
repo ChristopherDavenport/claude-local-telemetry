@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "bin": {
-    "claude-local-telemetry": "./src/cli.ts"
+    "claude-local-telemetry": "./dist/cli.js"
   },
   "scripts": {
     "sink": "node src/cli.ts sink",
@@ -19,10 +19,46 @@
     "test": "node --no-warnings=ExperimentalWarning --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "ui:dev": "npm --prefix ui run dev",
-    "ui:build": "npm --prefix ui run build"
+    "ui:build": "npm --prefix ui run build",
+    "build": "tsc",
+    "prepack": "npm run build",
+    "clean": "rm -rf dist"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.7.0"
+  },
+  "files": [
+    "dist",
+    "skills",
+    ".claude-plugin",
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChristopherDavenport/claude-local-telemetry.git"
+  },
+  "homepage": "https://github.com/ChristopherDavenport/claude-local-telemetry#readme",
+  "bugs": {
+    "url": "https://github.com/ChristopherDavenport/claude-local-telemetry/issues"
+  },
+  "author": "Christopher Davenport <chris@christopherdavenport.tech>",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "telemetry",
+    "observability",
+    "otel",
+    "opentelemetry",
+    "sqlite",
+    "mcp",
+    "cost",
+    "audit"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

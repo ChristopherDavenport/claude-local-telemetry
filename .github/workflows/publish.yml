@@ -1,0 +1,90 @@
+name: publish
+
+# Publishes to npm on a v* tag, using npm trusted publishing (GitHub OIDC).
+#
+# No NPM_TOKEN. The runner mints a short-lived OIDC token that npm exchanges for
+# publish rights, which is why `id-token: write` below is the load-bearing line
+# rather than a formality. Provenance attestation is generated automatically —
+# `--provenance` is not passed and `provenance` is deliberately absent from
+# publishConfig, because forcing it there breaks any publish outside OIDC.
+#
+# Before this can work, one-time setup on npmjs.com:
+#
+#   Packages -> claude-local-telemetry -> Settings -> Trusted publishing
+#     Organization or user: ChristopherDavenport
+#     Repository:           claude-local-telemetry
+#     Workflow filename:    publish.yml
+#     Environment:          (leave blank)
+#
+# That page only appears for a package that already exists, so the very first
+# version has to be published another way — see RELEASING.md. npm does not
+# validate the trusted-publisher config when you save it; a mistake surfaces
+# here as ENEEDAUTH.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # mint the OIDC token — without this, publish fails
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cache:` is deliberately omitted rather than set empty — that is how
+      # setup-node disables caching. A stale or poisoned cache is a
+      # supply-chain problem in a release build in a way it is not for a test.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm ci --no-audit --no-fund
+
+      # Publishing something that does not pass its own tests is worse than not
+      # publishing. prepack builds, but build explicitly so a failure here is
+      # legible rather than buried in pack output.
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The tag is the source of truth for the version; a mismatch means someone
+      # tagged without bumping, and npm would publish a version nobody expects.
+      - name: Tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "publishing $PKG"
+
+      # Proves the built bin actually runs from an installed tarball. Node
+      # refuses to strip types under node_modules, so a package that shipped
+      # only .ts would install fine and fail on first use — which is exactly
+      # what happened before dist/ existed.
+      - name: Installed bin executes
+        run: |
+          npm pack --pack-destination /tmp >/dev/null
+          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
+          npm install /tmp/claude-local-telemetry-*.tgz --no-audit --no-fund >/dev/null
+          ./node_modules/.bin/claude-local-telemetry | head -1
+          ./node_modules/.bin/claude-local-telemetry init --db /tmp/smoke.db
+          ./node_modules/.bin/claude-local-telemetry stats --db /tmp/smoke.db >/dev/null
+          echo "bin runs from an installed tarball"
+
+      - name: Publish
+        run: npm publish

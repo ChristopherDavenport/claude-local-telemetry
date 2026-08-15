@@ -143,6 +143,14 @@ CI runs Linux and macOS both. The first bug it ever caught was a BSD-only
 - Database lives at `~/.claude/telemetry/telemetry.db`, overridable with
   `CLAUDE_TELEMETRY_DB`.
 
+## Releasing
+
+Published to npm on a `v*` tag via GitHub OIDC trusted publishing — no
+`NPM_TOKEN`, with provenance attestation generated automatically. See
+[RELEASING.md](RELEASING.md), including the one-time bootstrap: the trusted
+publisher can only be configured for a package that already exists, so `0.1.0`
+has to go out manually first.
+
 ## Licence
 
 [MIT](LICENSE)
