@@ -44,7 +44,7 @@ const assistant = (i: number, rid: string, u: object, content: unknown[] = []) =
         message: { id: `msg_${i}`, model: "claude-opus-5", role: "assistant", usage: u, content } });
 
 before(() => {
-  work = mkdtempSync(join(tmpdir(), "claude-telemetry-test-"));
+  work = mkdtempSync(join(tmpdir(), "claude-local-telemetry-test-"));
   db = join(work, "t.db");
   root = join(work, "projects", "-tmp-demo");
   mkdirSync(root, { recursive: true });
@@ -254,7 +254,7 @@ test("the read-only guard refuses everything that is not a SELECT", () => {
 test("MCP handshake, tools/list and a tool call", () => {
   const init_ = dispatch({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, db);
   assert.equal((init_?.["result"] as Record<string, Record<string, string>>)["serverInfo"]!["name"],
-    "claude-telemetry");
+    "claude-local-telemetry");
   const list = dispatch({ jsonrpc: "2.0", id: 2, method: "tools/list" }, db);
   const tools = (list?.["result"] as { tools: unknown[] }).tools;
   assert.equal(tools.length, TOOLS.length);

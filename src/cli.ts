@@ -2,12 +2,12 @@
 /**
  * Single entry point.
  *
- *   claude-telemetry backfill [--root DIR] [--since ISO] [--dry-run]
- *   claude-telemetry sink     [--port 4318]
- *   claude-telemetry api      [--port 4319] [--ui DIR]
- *   claude-telemetry mcp
- *   claude-telemetry stats
- *   claude-telemetry init
+ *   claude-local-telemetry backfill [--root DIR] [--since ISO] [--dry-run]
+ *   claude-local-telemetry sink     [--port 4318]
+ *   claude-local-telemetry api      [--port 4319] [--ui DIR]
+ *   claude-local-telemetry mcp
+ *   claude-local-telemetry stats
+ *   claude-local-telemetry init
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected
@@ -36,7 +36,7 @@ function parse(argv: string[]) {
   return { flags, rest };
 }
 
-const USAGE = `claude-telemetry <command>
+const USAGE = `claude-local-telemetry <command>
 
   backfill   import ~/.claude/projects transcripts   [--root DIR --since ISO --dry-run --quiet]
   sink       receive OTLP from live sessions         [--host --port 4318 --verbose]

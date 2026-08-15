@@ -257,8 +257,8 @@ export function openForRead(dbPath?: string): DatabaseSync {
   const path = dbPath ?? defaultDbPath();
   if (!existsSync(path)) {
     throw new Error(
-      `no telemetry database at ${path}. Run \`claude-telemetry backfill\` to ` +
-      "import existing transcripts, or `claude-telemetry sink` to collect live sessions.",
+      `no telemetry database at ${path}. Run \`claude-local-telemetry backfill\` to ` +
+      "import existing transcripts, or `claude-local-telemetry sink` to collect live sessions.",
     );
   }
   const db = connect(path, { readonly: true });
@@ -271,7 +271,7 @@ export function openForRead(dbPath?: string): DatabaseSync {
     db.close();
     throw new Error(
       `${path} predates this version — missing ${missing.join(", ")}. ` +
-      `Run: claude-telemetry init --db ${path}  (idempotent; adds the new tables ` +
+      `Run: claude-local-telemetry init --db ${path}  (idempotent; adds the new tables ` +
       "and leaves existing rows alone)",
     );
   }

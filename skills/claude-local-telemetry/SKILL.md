@@ -1,5 +1,5 @@
 ---
-name: claude-telemetry
+name: claude-local-telemetry
 description: >
   Query, collect and audit local Claude Code telemetry — session cost, tool-call
   audit trail, token attribution by model, repo, skill or plugin. Use when asked

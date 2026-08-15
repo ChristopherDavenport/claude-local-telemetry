@@ -136,7 +136,7 @@ export function dispatch(msg: Record<string, unknown>, dbPath?: string): Record<
       jsonrpc: "2.0", id, result: {
         protocolVersion: PROTOCOL,
         capabilities: { tools: {} },
-        serverInfo: { name: "claude-telemetry", version: "0.1.0" },
+        serverInfo: { name: "claude-local-telemetry", version: "0.1.0" },
       },
     };
   }

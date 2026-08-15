@@ -1,4 +1,4 @@
-# claude-telemetry
+# claude-local-telemetry
 
 Local observability for [Claude Code](https://code.claude.com/docs). An OTLP
 sink, a transcript backfill, and an MCP server over one SQLite file — so you can
@@ -16,7 +16,7 @@ As a Claude Code plugin:
 
 ```
 /plugin marketplace add christopherdavenport/christopherdavenport-marketplace
-/plugin install claude-telemetry@christopherdavenport
+/plugin install claude-local-telemetry@christopherdavenport
 ```
 
 Or clone it. Node 24 is the only requirement; there is nothing to install and
@@ -28,8 +28,8 @@ Every Claude Code session has been writing a transcript to
 `~/.claude/projects/`. Import them and the store is useful immediately:
 
 ```sh
-npx claude-telemetry backfill
-npx claude-telemetry stats
+npx claude-local-telemetry backfill
+npx claude-local-telemetry stats
 ```
 
 Or from a clone, with no install at all — Node 24 runs the TypeScript directly:
