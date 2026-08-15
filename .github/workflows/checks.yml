@@ -13,22 +13,24 @@ permissions:
   contents: read
 
 jobs:
-  assertions:
+  test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Both, deliberately. The first bug CI ever caught here was `mktemp -t`,
-        # a BSD spelling that GNU rejects — green on macOS, broken on Linux.
+        # Both, deliberately. The first bug CI ever caught on this project was
+        # `mktemp -t`, a BSD spelling GNU rejects — green on macOS, broken on
+        # Linux, and invisible to anyone developing on a Mac.
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
-      - name: Suite
-        run: ./evals/run.sh
-      - name: Mutation check
-        run: ./evals/run.sh --mutate
-      - name: Scripts compile
-        run: python3 -m compileall -q scripts evals
+          node-version: "24"
+      # node:sqlite and TypeScript type-stripping are both built in, so the
+      # runtime needs nothing installed. This is only for tsc.
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Tests
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck

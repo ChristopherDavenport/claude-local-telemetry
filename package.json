@@ -1,0 +1,28 @@
+{
+  "name": "claude-telemetry",
+  "version": "0.1.0",
+  "description": "Local observability for Claude Code: OTLP sink, transcript backfill, and an MCP server over SQLite.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "claude-telemetry": "./src/cli.ts"
+  },
+  "scripts": {
+    "sink": "node src/cli.ts sink",
+    "backfill": "node src/cli.ts backfill",
+    "mcp": "node src/cli.ts mcp",
+    "api": "node src/cli.ts api",
+    "stats": "node src/cli.ts stats",
+    "test": "node --no-warnings=ExperimentalWarning --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "ui:dev": "npm --prefix ui run dev",
+    "ui:build": "npm --prefix ui run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
