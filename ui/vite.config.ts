@@ -1,5 +1,10 @@
 import { defineConfig } from "vite";
 
+// `process` below is a Node global, so this workspace needs @types/node of its
+// own. It resolved from the repo root during development and only failed in CI,
+// where nothing installs the root — the same shape of bug as the `mktemp`
+// spelling that the checks workflow was widened for.
+
 /**
  * Built output is served by `claude-local-telemetry api --ui <dir>`, from the
  * same origin as /api.
