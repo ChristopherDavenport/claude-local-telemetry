@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.1 — 2026-08-16
+
+First release published by CI, and therefore the first carrying a **provenance
+attestation**: a signed, verifiable statement of which commit and which workflow
+run produced the tarball. Verify it with `npm audit signatures`.
+
+No functional change. `0.1.0` is identical code — it went out by hand because a
+trusted publisher can only be configured for a package that already exists, so
+the first version can never be the one that proves the mechanism works. This is
+that proof.
+
+- `RELEASING.md` — the bootstrap section is marked done rather than reading as
+  outstanding work, records that 2FA at the terminal is now the expected path
+  for a manual publish rather than a misconfiguration, and warns that a Node
+  installed without its bundled npm leaves a much older client on `PATH`.
+
 ## 0.1.0 — 2026-08-16
 
 First release. Extracted from `christopherdavenport-marketplace` into its own

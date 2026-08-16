@@ -5,7 +5,12 @@ using npm **trusted publishing** — GitHub mints a short-lived OIDC token and n
 exchanges it for publish rights. There is no `NPM_TOKEN` anywhere in this repo,
 and provenance attestation is generated automatically.
 
-## One-time bootstrap
+## One-time bootstrap — done, kept as a record
+
+**This is complete. `0.1.0` went out manually on 2026-08-16 and the trusted
+publisher is configured.** Nothing below needs doing again; it is here so the
+shape of the problem is legible if the package is ever renamed or re-created,
+which resets the trusted-publisher config.
 
 Trusted publishing is configured **per package**, on a page that only exists for
 a package that has already been published. So the first version cannot use it.
@@ -20,6 +25,11 @@ npm publish --access public
 
 `publishConfig.provenance` is deliberately *not* set, so this manual publish
 works. It ships without provenance; every later release gets it.
+
+In practice this step needed 2FA at the terminal — npm now refuses tokens that
+bypass 2FA for direct publishing, so `EOTP` and a browser round-trip is the
+expected path, not a misconfiguration. It is also the reason the rest of this
+document exists: OIDC is the only way back to a non-interactive publish.
 
 **2. Configure the trusted publisher.**
 
@@ -46,6 +56,13 @@ traditional token auth, so it cannot lock out the workflow.
 npm version patch          # or minor / major — commits and tags
 git push --follow-tags
 ```
+
+Check `npm --version` first. A Node installed without its bundled npm — a
+`nodejs` build from a distro, or a `/usr/local` install where only `node` and
+`corepack` landed — leaves a much older npm ahead on `PATH`; this machine had
+npm 9 against Node 25. `npm version` will still run, but it is not the client
+anything else here assumes. `corepack npm@11 version patch` pins it without
+touching the system install.
 
 The workflow then builds, tests, typechecks, asserts the tag matches
 `package.json`, installs the packed tarball and runs the binary from it, and
