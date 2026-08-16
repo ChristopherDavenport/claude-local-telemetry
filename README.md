@@ -220,7 +220,7 @@ team-wide aggregation ever happens, revisit it — both collectors write through
 ## Tests
 
 ```sh
-npm test          # 16 assertions, deterministic, free
+npm test          # 27 assertions, deterministic, free
 npm run typecheck # tsc --noEmit; strict, with exactOptionalPropertyTypes
 ```
 
