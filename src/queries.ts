@@ -63,7 +63,8 @@ export function overview(db: DatabaseSync) {
 }
 
 export function cost(db: DatabaseSync, o: {
-  groupBy?: string | undefined; since?: string | undefined; until?: string | undefined; limit?: number | undefined;
+  groupBy?: string | undefined; since?: string | undefined; until?: string | undefined;
+  limit?: number | undefined; sessionId?: string | undefined;
 } = {}) {
   const key = o.groupBy ?? "model";
   const col = COST_GROUPS[key];
@@ -71,6 +72,7 @@ export function cost(db: DatabaseSync, o: {
   const where = ["1=1"]; const params: unknown[] = [];
   if (o.since) { where.push("ts >= ?"); params.push(o.since); }
   if (o.until) { where.push("ts <= ?"); params.push(o.until); }
+  if (o.sessionId) { where.push("session_id = ?"); params.push(o.sessionId); }
   const limit = o.limit ?? 50;
   const sql =
     `SELECT ${col} AS grp, count(*) AS n, sum(cost_usd) AS cost_usd,` +

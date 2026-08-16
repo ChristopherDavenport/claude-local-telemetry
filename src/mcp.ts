@@ -52,10 +52,11 @@ export const TOOLS: Tool[] = [
     description:
       "Spend and token totals grouped by model, day, hour, plugin, skill, agent, " +
       "session, cwd, git_branch, query_source, speed or effort.",
-    inputSchema: obj({ group_by: S, since: S, until: S, limit: I }),
+    inputSchema: obj({ group_by: S, since: S, until: S, limit: I, session_id: S }),
     run: (db, a) => Q.cost(db, {
       groupBy: a["group_by"] as string, since: a["since"] as string,
       until: a["until"] as string, limit: a["limit"] as number,
+      sessionId: a["session_id"] as string,
     }),
   },
   {

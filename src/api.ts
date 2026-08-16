@@ -34,6 +34,7 @@ function routes(dbPath?: string): Record<string, Handler> {
     "/api/cost": (p) => withDb((db) => Q.cost(db, {
       groupBy: s(p.get("group_by")), since: s(p.get("since")),
       until: s(p.get("until")), limit: num(p.get("limit")),
+      sessionId: s(p.get("session_id")),
     }))(),
     "/api/sessions": (p) => withDb((db) => Q.sessions(db, {
       since: s(p.get("since")), cwdLike: s(p.get("cwd_like")), limit: num(p.get("limit")),

@@ -17,7 +17,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
 import { table as tableStyles } from "../shared.js";
 
-export type Cell = TemplateResult | string | number | null;
+/** `nothing` is included: a cell that renders empty is a normal outcome. */
+export type Cell = TemplateResult | string | number | null | typeof nothing;
 
 export interface Column {
   /** Identity for sort state; also the default value accessor. */
