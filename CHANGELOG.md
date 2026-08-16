@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+Setup documentation rewritten against a first real install, which surfaced a
+gap that made the documented happy path produce a degraded store.
+
+- **The content flags are in the setup block now.** Every OTel content
+  attribute is off by default, so following the old instructions exactly gave
+  you a `telemetry_tool_audit` where tool, MCP, skill and workflow names were
+  all `<REDACTED>`, with nothing saying why. `OTEL_LOG_TOOL_DETAILS` is
+  required for the audit surface to be readable; the rest are fidelity, tabled
+  with what each one exposes so the privacy trade is a decision.
+- **Running the sink as a service.** `sink &` dies with the terminal and
+  `cost_usd` only covers the period the sink was up, so uptime is the whole
+  game. Covers launchd and systemd, and the two failure modes that are silent:
+  a service manager's minimal `PATH` cannot resolve a version-manager Node, and
+  the plugin cache is a managed, versioned directory that moves on update — so
+  point the unit at a global install and an absolute Node path.
+- **What npm is for.** The package is the stable binary for the daemon; the
+  marketplace is the plugin. Separate channels, stated as such.
+- **`src/**/*.ts` is in `files`.** The tarball shipped only `dist/`, while
+  `plugin.json` points the MCP server at `${CLAUDE_PLUGIN_ROOT}/src/cli.ts`, so
+  a marketplace using an `npm` plugin source installed a working skill and
+  fourteen dead MCP tools with no error. Both layouts now ship (~114 KB more,
+  240 KB unpacked).
+- **`alias derive` on a fresh sink.** Its `learned 0 mapping(s)` output is
+  correct, not a failure — the mapping needs overlap between the two sources.
+  Documented, along with `bySource` in `telemetry_overview` as the canonical
+  "is the sink receiving" check, and the fact that `env` in `settings.json` is
+  read at startup.
+
 ## 0.1.2 — 2026-08-16
 
 The tag is now the version. Releasing is `git tag` and a push; `package.json`

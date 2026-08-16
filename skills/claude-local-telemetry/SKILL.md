@@ -64,7 +64,8 @@ node ${CLAUDE_PLUGIN_ROOT}/src/cli.ts backfill
 node ${CLAUDE_PLUGIN_ROOT}/src/cli.ts stats
 ```
 
-For live collection, start the sink and point Claude Code at it:
+For live collection, start the sink *before* enabling the exporters — Claude
+Code drops an export it cannot deliver, silently:
 
 ```sh
 node ${CLAUDE_PLUGIN_ROOT}/src/cli.ts sink &
@@ -74,11 +75,32 @@ export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # traces; beta, off by default
 export OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=otlp OTEL_TRACES_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/json   # no default — must be set
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_LOG_TOOL_DETAILS=1                 # else tool/skill/MCP names redact
 ```
 
-Put the exports in `~/.claude/settings.json` under `env` to avoid editing a
-shell profile. `http/json` is what makes the sink dependency-free — with `grpc` or
-`http/protobuf` it would need a collector. Requires Node 24 for `node:sqlite`.
+Put these in `~/.claude/settings.json` under `env` rather than a shell profile;
+it is read at startup, so a running session will not pick it up. `http/json` is
+what makes the sink dependency-free — with `grpc` or `http/protobuf` it would
+need a collector. Requires Node 24 for `node:sqlite`.
+
+`OTEL_LOG_TOOL_DETAILS` is not optional for the audit surface. Content
+attributes are off by default, and without it tool names, MCP server and tool
+names, skill and workflow names, tool input and file paths all arrive as
+`<REDACTED>` — so `telemetry_tool_audit` returns rows you cannot read.
+`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES` and
+`OTEL_LOG_TOOL_CONTENT` add prompt, response and payload text on top; they are
+fidelity, and each puts more of the session into an unencrypted file.
+
+This is a different redaction from the `third-party` plugin blinding, which no
+flag fixes — `alias derive` is what resolves that, and only once the sink has
+collected enough for the two sources to overlap.
+
+`sink &` dies with its terminal, and `cost_usd` exists only for the period the
+sink was running. For continuous collection run it as a user service (launchd
+or systemd) pointed at a global `npm i -g claude-local-telemetry` install, with
+an absolute path to the Node binary — service managers start with a minimal
+`PATH`, and the plugin directory is a managed cache that moves on update. The
+README has the details.
 
 The database lives at `~/.claude/telemetry/telemetry.db`, overridable with
 `CLAUDE_TELEMETRY_DB`.
