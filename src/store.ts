@@ -57,10 +57,10 @@ export const TABLES = [
  * are applied by `init()` and asserted by `openForRead()` via schema_version.
  *
  * They hang off the *turn* rather than the session on purpose. A subagent
- * transcript carries its parent's `sessionId` — measured on a real corpus, 366
- * of 375 do, and the remaining 9 carry none — so an agent is not a session and
- * `sessions.parent_session_id` would have been self-referential. What an agent
- * actually owns is a set of requests and tool calls.
+ * transcript carries its parent's `sessionId`, or none at all — so an agent is
+ * not a session, and `sessions.parent_session_id` would have been
+ * self-referential. What an agent actually owns is a set of requests and tool
+ * calls.
  */
 const V2_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
   api_requests: [["agent_id", "TEXT"], ["workflow_run_id", "TEXT"],

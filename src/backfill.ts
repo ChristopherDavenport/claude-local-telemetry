@@ -102,9 +102,9 @@ export interface PathContext {
  * so which agent produced a transcript, and which workflow run it belonged to,
  * is in the path and nowhere else.
  *
- * The records inside carry the *parent's* `sessionId` — 366 of 375 do on a real
- * corpus, and the other 9 carry none — so an agent is not a separate session.
- * Its turns simply landed in the parent's session unlabelled, which is why
+ * The records inside carry the *parent's* `sessionId`, or none at all — so an
+ * agent is not a separate session. Its turns simply landed in the parent's
+ * session unlabelled, which is why
  * `agent_id` hangs off `api_requests` and `tool_calls` rather than `sessions`.
  */
 export function pathContext(file: string, root: string): PathContext {

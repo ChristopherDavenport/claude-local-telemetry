@@ -381,8 +381,8 @@ export function runQuery(db: DatabaseSync, o: {
  * The two id spaces do not use one format. A plain agent's transcript is named
  * for the same id the parent reported, so those join directly. A named teammate
  * is reported as `name@team` but files its transcript as `a<name>-<hash>`, so
- * those join on the label instead — a rule that resolved all 49 team members on
- * a real corpus, against 128 of 366 for exact matching alone.
+ * those join on the label instead. Exact matching alone reaches only the plain
+ * agents; the label rule is what brings teammates in.
  *
  * Queries lead with the measured side regardless, and treat the reported
  * metadata as enrichment that may be absent, rather than inner-joining and
