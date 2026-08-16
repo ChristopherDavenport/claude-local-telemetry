@@ -52,26 +52,72 @@ traditional token auth, so it cannot lock out the workflow.
 
 ## Every release after that
 
+**The tag is the version.** Bump `.claude-plugin/plugin.json` in the PR, merge
+it, then tag:
+
 ```sh
-npm version patch          # or minor / major — commits and tags
-git push --follow-tags
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
-Check `npm --version` first. A Node installed without its bundled npm — a
-`nodejs` build from a distro, or a `/usr/local` install where only `node` and
-`corepack` landed — leaves a much older npm ahead on `PATH`; this machine had
-npm 9 against Node 25. `npm version` will still run, but it is not the client
-anything else here assumes. `corepack npm@11 version patch` pins it without
-touching the system install.
+That is the whole release. There is no bump commit and no `npm version` run:
+`package.json` carries `0.0.0` in the repo, and the workflow writes the real
+number from the tag before it builds. The two cannot disagree, because only one
+of them is ever authored.
 
-The workflow then builds, tests, typechecks, asserts the tag matches
-`package.json`, installs the packed tarball and runs the binary from it, and
-publishes.
+`git push origin <tag>` rather than `--follow-tags`, deliberately. `--follow-tags`
+pushes *every* annotated tag reachable from the commits it sends, so a tag kept
+back on purpose — a local marker, a release being staged — rides along and
+triggers a publish nobody asked for.
+
+Two things the workflow checks that you should know it checks:
+
+- **`plugin.json` must already equal the tag's release core.** It is
+  hand-maintained because the marketplace clones this repo and never sees the
+  tarball, so a version CI wrote at pack time would not reach plugin users. A
+  mismatch fails the run before anything is published — delete the tag, bump the
+  file, tag again. It drifted silently from `0.1.0` through the whole of `0.1.1`,
+  which is why this is enforced rather than trusted.
+- **A prerelease tag publishes under `next`, not `latest`.** `v0.2.0-rc.1` is
+  detected by the hyphen. npm hands `latest` to whatever was published most
+  recently unless told otherwise, so without this an rc would become the default
+  install for everyone. The `plugin.json` check compares the *core* — `0.1.2`
+  for `v0.1.2-rc.1` — so it holds the version being worked toward and every rc
+  for it passes. Demanding an exact match would mean committing `0.1.2-rc.1` and
+  then `0.1.2`, reintroducing the churn the tag exists to remove.
+
+Running the workflow manually (`workflow_dispatch`) does everything except
+publish — a dry run of the whole pipeline against whatever `main` is.
+
+The workflow builds, tests, typechecks, derives the version, installs the packed
+tarball and runs the binary from it, confirms the packed version matches the
+tag, and publishes.
 
 That last check is not ceremony. Node refuses to strip TypeScript types under
 `node_modules`, so a package shipping only `.ts` installs cleanly and fails on
 first use — which is precisely what happened here before `dist/` existed. The
 smoke step is the only thing that would catch it recurring.
+
+## Where the version lives
+
+Three places, and only one of them is authored by hand:
+
+| | Value in the repo | Who writes it |
+|---|---|---|
+| `package.json` | `0.0.0` | CI, from the tag, at release time |
+| `.claude-plugin/plugin.json` | the real version | you, in the PR before the tag |
+| MCP `serverInfo` | — | read from `plugin.json` at runtime |
+
+`0.0.0` in `package.json` is a placeholder, not a mistake. Packing from a clone
+produces `claude-local-telemetry-0.0.0.tgz`, which is the honest answer: that
+tarball is not a release.
+
+`serverInfo` reads `plugin.json` rather than `package.json` because it is the
+one manifest correct in both channels — the tag only reaches `package.json`
+inside CI, so a marketplace clone running from `src/` would report the
+placeholder. `../.claude-plugin/plugin.json` resolves identically from `src/`
+and `dist/`, since both sit one level under the package root. It was hardcoded
+before, and reported `0.1.0` for the whole of the `0.1.1` release.
 
 ## Requirements
 
