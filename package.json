@@ -30,6 +30,7 @@
   },
   "files": [
     "dist/**/*.js",
+    "src/**/*.ts",
     "skills",
     ".claude-plugin",
     "README.md",

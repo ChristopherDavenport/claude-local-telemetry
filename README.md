@@ -45,19 +45,94 @@ deduplicates on a natural key.
 
 ## Collect live sessions
 
+Start the sink first. Claude Code drops an export it cannot deliver, so
+enabling telemetry against a dead endpoint collects nothing and reports no
+error:
+
 ```sh
 node src/cli.ts sink &
 ```
 
-Then point Claude Code at it, ideally via `env` in `~/.claude/settings.json`:
+Then point Claude Code at it. `env` in `~/.claude/settings.json` is the durable
+place — the values apply to every session without touching a shell profile:
 
-```sh
-export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # traces; beta, off by default
-export OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=otlp OTEL_TRACES_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json   # no default — must be set
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_TRACES_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+    "OTEL_LOG_TOOL_DETAILS": "1"
+  }
+}
 ```
+
+`env` is read at startup, so a session already running will not pick this up.
+
+### The content flags are not optional here
+
+`OTEL_LOG_TOOL_DETAILS` is in the block above deliberately. Every OTel content
+attribute is **off by default**, and with them off the fields this tool exists
+to show arrive as `<REDACTED>`:
+
+| Flag | Unlocks | Exposes |
+|---|---|---|
+| `OTEL_LOG_TOOL_DETAILS=1` | Tool names, MCP server and tool names, skill and workflow names, tool input, file paths. **`telemetry_tool_audit` is mostly redacted without it.** | Bash command lines and file paths |
+| `OTEL_LOG_USER_PROMPTS=1` | Prompt text on `user_prompt` events | What you typed |
+| `OTEL_LOG_ASSISTANT_RESPONSES=1` | Assistant response text | What came back |
+| `OTEL_LOG_TOOL_CONTENT=1` | Tool input and output bodies in span events. Needs tracing on. | Full tool payloads |
+
+Only the first is needed for the audit and cost surfaces to read properly. The
+rest are fidelity, and each one puts more of your session into an unencrypted
+file — see [Cautions](#cautions). Note this is a *different* redaction from the
+`third-party` plugin blinding, which no flag fixes; that one is what
+[`alias derive`](#un-blinding-plugin-cost) is for.
+
+### Keeping the sink up
+
+`sink &` dies with the terminal, and `cost_usd` only exists for the period the
+sink was running — so uptime is the whole game. Run it as a user service.
+
+On macOS, a LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad` and
+`KeepAlive` set. On Linux, a systemd user unit with `Restart=always` and
+`systemctl --user enable --now`.
+
+Two things make the difference between a service that works and one that fails
+silently:
+
+- **Give the absolute path to the Node binary, not the bare command.** launchd
+  and systemd start with a minimal `PATH`, so a Node installed by nvm, fnm, asdf
+  or volta will not resolve, and the shebang's `/usr/bin/env node` will not
+  either. `command -v node` gives you the path to hard-code.
+- **Point the service at a global install, not at the plugin directory.**
+  Claude Code keeps plugins in a versioned, managed cache, so that path moves
+  on the next plugin update and leaves the unit pointing at nothing:
+
+  ```sh
+  npm i -g claude-local-telemetry     # stable path: command -v claude-local-telemetry
+  ```
+
+  This is what the npm package is *for*. Install the plugin from the
+  marketplace to get the skill and the MCP server; install the package globally
+  to get a binary a service manager can rely on. They are separate channels on
+  purpose.
+
+### Checking it works
+
+`telemetry_overview` reports a `bySource` breakdown, and that is the tell:
+
+```
+"bySource": { "otel": 2, "transcript": 28268 }
+```
+
+An `otel` count above zero means the sink is receiving. Metrics flush on an
+interval rather than per request, so give it a minute before concluding
+anything — or set `OTEL_METRIC_EXPORT_INTERVAL=10000` while you are debugging
+and drop it again afterwards.
 
 `http/json` is the load-bearing setting. It makes the payloads plain JSON, which
 is why the receiver is `node:http` and nothing else instead of a collector
@@ -153,6 +228,18 @@ hash that maps to two names is reported as ambiguous rather than resolved by
 majority — settle those with `alias set <hash> <name>`, which outranks a derived
 mapping and survives re-derivation.
 
+Run this *after* the sink has collected for a while, not the moment you enable
+it. The mapping is read off the overlap between the two sources, so with little
+OTel data there is nothing to join and it correctly reports:
+
+```
+learned 0 mapping(s); 0/0 hashes now named
+no plugin_id_hash in the store: that only arrives from the OTLP sink.
+```
+
+That is the expected output on a fresh sink, not a failure. It is idempotent —
+re-run it whenever you want to pick up newly seen plugins.
+
 ## Ask it things
 
 The MCP server exposes fourteen read-only tools — `telemetry_overview`,
@@ -235,8 +322,11 @@ CI runs Linux and macOS both. The first bug it ever caught was a BSD-only
 ## Cautions
 
 - **The store holds prompts and tool inputs.** OTel includes them when the
-  content flags are on; transcripts include them regardless. The file is
-  unencrypted. Treat it as sensitive.
+  [content flags](#the-content-flags-are-not-optional-here) are on; transcripts
+  include them regardless. The file is unencrypted. Treat it as sensitive —
+  turning on `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_CONTENT` puts a second
+  copy of that material somewhere you may not think to check before sharing a
+  directory or a backup.
 - **The sink binds to loopback and does no authentication.** Don't expose it.
 - Database lives at `~/.claude/telemetry/telemetry.db`, overridable with
   `CLAUDE_TELEMETRY_DB`.
@@ -252,6 +342,26 @@ and nothing else — no bump commit to forget, and no way for the tag and the
 manifest to disagree. `.claude-plugin/plugin.json` is the exception: the
 marketplace clones this repo rather than installing the tarball, so its version
 is committed, and the workflow refuses to publish if it does not match the tag.
+
+### The tarball is also a valid plugin payload
+
+It ships `.claude-plugin/`, `skills/` and both `src/` and `dist/`, so a
+marketplace may list this with an npm source:
+
+```json
+{ "source": "npm", "package": "claude-local-telemetry", "version": "0.1.3" }
+```
+
+`src/` is in `files` specifically to make that work. `plugin.json` points the
+MCP server at `${CLAUDE_PLUGIN_ROOT}/src/cli.ts`, which a git checkout has and
+a `dist`-only tarball would not — an npm install would then have produced a
+working skill and a dead MCP server, with no error to explain it. Shipping both
+layouts costs a few KB and removes the failure mode.
+
+Pin an exact `version` rather than a range if you publish a measured
+context-cost number for the plugin, since a range makes the installed tree
+unknowable. A git source with a `sha` is equally exact and is the better fit
+when you want the tree you can read to be the tree that installs.
 
 See [RELEASING.md](RELEASING.md).
 
