@@ -69,6 +69,16 @@ export class ViewTools extends TlView<ToolAudit> {
   @state() private decision = "";
   @state() private success: SuccessFilter = "any";
   @state() private limit = 100;
+  /** Set from ?agent= so a workflow or session can link straight to one agent's calls. */
+  @state() private agentId = "";
+
+  override connectedCallback() {
+    this.agentId = new URLSearchParams(location.search).get("agent") ?? "";
+    // An agent's calls are the whole point of the link; a 7-day default would
+    // usually hide them.
+    if (this.agentId) this.days = null;
+    super.connectedCallback();
+  }
 
   protected override fetchData(signal: AbortSignal): Promise<ToolAudit> {
     return api.tools(
@@ -78,6 +88,7 @@ export class ViewTools extends TlView<ToolAudit> {
         decision: this.decision || undefined,
         success: this.success === "any" ? undefined : this.success === "true",
         limit: this.limit,
+        agentId: this.agentId || undefined,
       },
       signal,
     );
@@ -87,6 +98,21 @@ export class ViewTools extends TlView<ToolAudit> {
     const d = this.data;
     return html`
       <h1>Tool audit</h1>
+      ${this.agentId
+        ? html`<p class="panel-note">
+            Filtered to agent <span class="mono">${this.agentId}</span> —
+            <a
+              href="/tools"
+              @click=${(e: Event) => {
+                e.preventDefault();
+                history.replaceState({}, "", "/tools");
+                this.agentId = "";
+                void this.reload();
+              }}
+              >clear</a
+            >
+          </p>`
+        : nothing}
 
       <div class="toolbar">
         <span class="field">

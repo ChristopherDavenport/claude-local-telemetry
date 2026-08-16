@@ -1,53 +1,45 @@
 /**
  * One session, drilled into.
  *
- * There is no per-session endpoint on the API, so this composes the generic
- * `/api/query` aggregate with `/api/trace`. That is a deliberate limit rather
- * than an oversight worth routing around: `queries.ts` is the shared surface
- * for the MCP server and this dashboard both, and quietly adding a
- * dashboard-only query would start exactly the drift that module exists to
- * prevent. If a first-class session endpoint is wanted, it belongs there — and
- * then Claude gets it too.
+ * This used to compose `/api/query` aggregates and interpolate
+ * `session_id='…'` into a `where` string, guarded by a regex on the id. Every
+ * query it needs now takes a `sessionId` parameter, so the string-building and
+ * its guard are gone and the page can show real rows instead of only totals.
  *
- * The consequence is visible: this page shows composition and totals, not a
- * per-request log, because `/api/query` returns aggregates.
+ * The agents card is the reason this page is worth opening on a session that
+ * delegated: subagent turns are recorded against this same session id, so
+ * without the breakdown their cost simply inflates the session's totals with no
+ * indication of where it went.
  */
 
 import { html, css, nothing } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, property } from "lit/decorators.js";
 import "@jack-henry/jh-ui/components/card/card.js";
 import "@jack-henry/jh-ui/components/notification/notification.js";
 
 import { TlView } from "../view-base.js";
-import { api, type QueryResult, type TraceResult } from "../api.js";
+import {
+  api, type SessionRow, type CostResult, type ToolAudit, type ToolRow,
+  type AgentList, type AgentRow, type TraceResult,
+} from "../api.js";
 import { panel, layout } from "../shared.js";
+import { navigate } from "../navigate.js";
 import * as f from "../format.js";
+import type { Column } from "../components/tl-table.js";
 
 import "../components/tl-state.js";
 import "../components/tl-stat.js";
+import "../components/tl-table.js";
 import "../components/tl-bars.js";
 import "../components/tl-trace-tree.js";
 
 interface Data {
-  cwd: QueryResult;
-  branch: QueryResult;
-  requests: QueryResult;
-  cost: QueryResult;
-  byModel: QueryResult;
-  tools: QueryResult;
-  outcomes: QueryResult;
+  session: SessionRow | null;
+  byModel: CostResult;
+  tools: ToolAudit;
+  agents: AgentList;
   trace: TraceResult;
 }
-
-/**
- * `where` is interpolated into SQL by the server, which rejects statement
- * separators and DDL but does not parameterise. Session ids are UUIDs, so
- * anything outside this alphabet is not an id we generated — refuse rather
- * than send it.
- */
-const SAFE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-
-const first = (r: QueryResult | undefined): number | null => r?.rows[0]?.value ?? null;
 
 @customElement("view-session")
 export class ViewSession extends TlView<Data> {
@@ -108,28 +100,16 @@ export class ViewSession extends TlView<Data> {
 
   @property({ type: String }) sessionId = "";
 
-  @state() private rejected = false;
-
   protected override async fetchData(signal: AbortSignal): Promise<Data> {
-    const id = this.sessionId;
-    if (!SAFE_ID.test(id)) {
-      this.rejected = true;
-      throw new Error(`"${id}" is not a valid session id.`);
-    }
-    this.rejected = false;
-    const where = `session_id='${id}'`;
-
-    const [cwd, branch, requests, cost, byModel, tools, outcomes, trace] = await Promise.all([
-      api.query({ table: "sessions", calculate: "count", breakdown: "cwd", where }, signal),
-      api.query({ table: "sessions", calculate: "count", breakdown: "git_branch", where }, signal),
-      api.query({ table: "api_requests", calculate: "count", where }, signal),
-      api.query({ table: "api_requests", calculate: "sum_cost", where }, signal),
-      api.query({ table: "api_requests", calculate: "sum_cost", breakdown: "model", where }, signal),
-      api.query({ table: "tool_calls", calculate: "count", breakdown: "tool_name", where, limit: 25 }, signal),
-      api.query({ table: "tool_calls", calculate: "count", breakdown: "decision", where }, signal),
-      api.trace({ sessionId: id }, signal),
+    const sessionId = this.sessionId;
+    const [list, byModel, tools, agents, trace] = await Promise.all([
+      api.sessions({ sessionId, limit: 1 }, signal),
+      api.cost({ groupBy: "model", sessionId, limit: 12 }, signal),
+      api.tools({ sessionId, limit: 100 }, signal),
+      api.agents({ sessionId, limit: 50 }, signal),
+      api.trace({ sessionId }, signal),
     ]);
-    return { cwd, branch, requests, cost, byModel, tools, outcomes, trace };
+    return { session: list.rows[0] ?? null, byModel, tools, agents, trace };
   }
 
   override willUpdate(changed: Map<string, unknown>) {
@@ -146,42 +126,49 @@ export class ViewSession extends TlView<Data> {
       <div class="head">
         <a class="back" href="/sessions/">&larr; All sessions</a>
         <h1>${this.sessionId}</h1>
-        ${d ? this.renderMeta(d) : nothing}
+        ${d?.session ? this.renderMeta(d.session) : nothing}
       </div>
 
-      <tl-state .loading=${this.loading && !d} .error=${this.error}>
-        ${d && !this.rejected ? this.renderData(d) : nothing}
+      <tl-state
+        .loading=${this.loading && !d}
+        .error=${this.error}
+        .empty=${!!d && !d.session}
+        emptyText="No such session"
+      >
+        ${d && d.session ? this.renderData(d, d.session) : nothing}
       </tl-state>
     `;
   }
 
-  private renderMeta(d: Data) {
-    const cwd = d.cwd.rows[0]?.grp ?? null;
-    const branch = d.branch.rows[0]?.grp ?? null;
-    if (!cwd && !branch) return nothing;
+  private renderMeta(s: SessionRow) {
     return html`
       <div class="meta">
-        ${cwd ? html`<span title=${cwd}>📁 ${cwd}</span>` : nothing}
-        ${branch ? html`<span>⎇ ${branch}</span>` : nothing}
+        ${s.cwd ? html`<span title=${s.cwd}>📁 ${s.cwd}</span>` : nothing}
+        ${s.branch ? html`<span>⎇ ${s.branch}</span>` : nothing}
+        ${s.started_at ? html`<span>${f.dateTime(s.started_at)}</span>` : nothing}
       </div>
     `;
   }
 
-  private renderData(d: Data) {
-    const toolTotal = d.tools.rows.reduce((a, r) => a + (r.value ?? 0), 0);
-    const denied = d.outcomes.rows
-      .filter((r) => r.grp && r.grp !== "allow")
-      .reduce((a, r) => a + (r.value ?? 0), 0);
+  private renderData(d: Data, s: SessionRow) {
+    const denied = d.tools.rows.filter((r) => r.decision && r.decision !== "allow").length;
+    const agentIn = d.agents.rows.reduce((a, r) => a + (r.input_tokens ?? 0), 0);
 
     return html`
       <div class="stats">
-        <tl-stat label="Requests" value=${f.count(first(d.requests))}></tl-stat>
+        <tl-stat label="Requests" value=${f.count(s.requests)}></tl-stat>
         <tl-stat
           label="Cost"
-          value=${f.usd(first(d.cost))}
+          value=${f.usd(s.cost_usd)}
           caveat="Null unless this session was captured by the OTLP sink."
         ></tl-stat>
-        <tl-stat label="Tool calls" value=${f.count(toolTotal)}></tl-stat>
+        <tl-stat label="Tool calls" value=${f.count(s.tool_calls)}></tl-stat>
+        <tl-stat
+          label="Agents"
+          value=${f.count(d.agents.rows.length)}
+          sub=${d.agents.rows.length ? `${f.short(agentIn)} tokens delegated` : ""}
+          caveat="Subagent turns are recorded against this session, so their cost is already inside the totals above."
+        ></tl-stat>
         <tl-stat
           label="Non-allow decisions"
           value=${f.count(denied)}
@@ -189,29 +176,77 @@ export class ViewSession extends TlView<Data> {
         ></tl-stat>
       </div>
 
+      ${d.agents.rows.length
+        ? html`
+            <jh-card
+              header-title="Delegated to agents"
+              header-subtitle="Measured from each agent's own transcript"
+              padding="medium"
+              show-header-divider
+            >
+              <tl-table
+                .columns=${this.agentColumns()}
+                .rows=${d.agents.rows}
+                clickable
+                @row-click=${(e: CustomEvent<AgentRow>) =>
+                  e.detail.workflow_run_id
+                    ? navigate(this, `/workflow/${e.detail.workflow_run_id}`)
+                    : navigate(this, `/tools?agent=${encodeURIComponent(e.detail.agent_id)}`)}
+              ></tl-table>
+            </jh-card>
+          `
+        : nothing}
+
       <div class="grid-2">
         <jh-card header-title="Cost by model" padding="medium" show-header-divider>
           ${d.byModel.rows.length
             ? html`
                 <tl-bars
-                  .data=${d.byModel.rows.map((r) => ({ label: r.grp ?? "—", value: r.value }))}
-                  .format=${(v: number | null) => f.usd(v)}
+                  .data=${d.byModel.rows.map((r) => ({
+                    label: r.grp ?? "—",
+                    value: r.cost_usd ?? (r.input_tokens ?? 0) + (r.cache_read ?? 0),
+                    detail: `${f.count(r.n)} requests`,
+                  }))}
+                  .format=${d.byModel.rows.some((r) => r.cost_usd != null)
+                    ? (v: number | null) => f.usd(v)
+                    : (v: number | null) => f.short(v)}
                 ></tl-bars>
+                ${d.byModel.rows.some((r) => r.cost_usd != null)
+                  ? nothing
+                  : html`<p class="panel-note" style="margin: var(--jh-size-300) 0 0">
+                      No cost recorded — showing input plus cache tokens.
+                    </p>`}
               `
             : html`<tl-state empty emptyText="No requests recorded"></tl-state>`}
         </jh-card>
 
         <jh-card header-title="Tools used" padding="medium" show-header-divider>
-          ${d.tools.rows.length
+          ${d.tools.summary.length
             ? html`
                 <tl-bars
-                  .data=${d.tools.rows.map((r) => ({ label: r.grp ?? "—", value: r.value }))}
+                  .data=${d.tools.summary.map((t) => ({
+                    label: t.tool_name ?? "—",
+                    value: t.n,
+                    detail: t.failures ? `${t.failures} failed` : "no failures",
+                  }))}
                   .format=${(v: number | null) => f.count(v)}
                 ></tl-bars>
               `
             : html`<tl-state empty emptyText="No tool calls recorded"></tl-state>`}
         </jh-card>
       </div>
+
+      ${d.tools.rows.length
+        ? html`
+            <jh-card header-title="Tool calls" padding="medium" show-header-divider>
+              <tl-table
+                caption=${`${d.tools.rows.length} most recent`}
+                .columns=${this.toolColumns()}
+                .rows=${d.tools.rows}
+              ></tl-table>
+            </jh-card>
+          `
+        : nothing}
 
       <jh-card
         header-title="Observability tree"
@@ -222,6 +257,66 @@ export class ViewSession extends TlView<Data> {
         ${this.renderTrace(d.trace)}
       </jh-card>
     `;
+  }
+
+  private agentColumns(): Column[] {
+    return [
+      {
+        key: "label",
+        label: "Agent",
+        render: (r: AgentRow) =>
+          html`<span class="mono" title=${r.agent_id}>${r.label ?? f.shortId(r.agent_id, 16)}</span>`,
+      },
+      {
+        key: "agent_type",
+        label: "Type",
+        render: (r: AgentRow) => r.agent_type ?? html`<span class="muted">—</span>`,
+      },
+      {
+        key: "workflow_run_id",
+        label: "Workflow",
+        render: (r: AgentRow) =>
+          r.workflow_run_id
+            ? html`<span class="mono">${f.shortId(r.workflow_run_id, 14)}</span>`
+            : html`<span class="muted">—</span>`,
+      },
+      { key: "requests", label: "Requests", align: "right", render: (r: AgentRow) => f.count(r.requests) },
+      {
+        key: "input_tokens",
+        label: "In + cache",
+        align: "right",
+        render: (r: AgentRow) => f.short(r.input_tokens),
+      },
+      {
+        key: "output_tokens",
+        label: "Out",
+        align: "right",
+        render: (r: AgentRow) => f.short(r.output_tokens),
+      },
+    ];
+  }
+
+  private toolColumns(): Column[] {
+    return [
+      { key: "ts", label: "When", render: (r: ToolRow) => f.dateTime(r.ts) },
+      { key: "tool_name", label: "Tool" },
+      {
+        key: "success",
+        label: "Result",
+        render: (r: ToolRow) =>
+          r.success == null
+            ? html`<span class="muted">—</span>`
+            : r.success
+              ? html`<span class="positive">ok</span>`
+              : html`<span class="negative">${r.error_type ?? "failed"}</span>`,
+      },
+      {
+        key: "decision",
+        label: "Decision",
+        render: (r: ToolRow) => r.decision ?? html`<span class="muted">—</span>`,
+      },
+      { key: "duration_ms", label: "Duration", align: "right", render: (r: ToolRow) => f.ms(r.duration_ms) },
+    ];
   }
 
   private renderTrace(t: TraceResult) {

@@ -52,19 +52,20 @@ export const TOOLS: Tool[] = [
     description:
       "Spend and token totals grouped by model, day, hour, plugin, skill, agent, " +
       "session, cwd, git_branch, query_source, speed or effort.",
-    inputSchema: obj({ group_by: S, since: S, until: S, limit: I }),
+    inputSchema: obj({ group_by: S, since: S, until: S, limit: I, session_id: S }),
     run: (db, a) => Q.cost(db, {
       groupBy: a["group_by"] as string, since: a["since"] as string,
       until: a["until"] as string, limit: a["limit"] as number,
+      sessionId: a["session_id"] as string,
     }),
   },
   {
     name: "telemetry_sessions",
     description: "Recent sessions with cost, tokens, tool-call count, cwd and branch.",
-    inputSchema: obj({ since: S, cwd_like: S, limit: I }),
+    inputSchema: obj({ since: S, cwd_like: S, session_id: S, limit: I }),
     run: (db, a) => Q.sessions(db, {
       since: a["since"] as string, cwdLike: a["cwd_like"] as string,
-      limit: a["limit"] as number,
+      sessionId: a["session_id"] as string, limit: a["limit"] as number,
     }),
   },
   {
@@ -72,11 +73,13 @@ export const TOOLS: Tool[] = [
     description:
       "Audit surface: tool calls with success, duration, permission decision and who " +
       "made it. Filter by tool_name, success, decision or time.",
-    inputSchema: obj({ tool_name: S, success: B, decision: S, since: S, limit: I }),
+    inputSchema: obj({ tool_name: S, success: B, decision: S, since: S, limit: I,
+                       session_id: S, agent_id: S }),
     run: (db, a) => Q.toolAudit(db, {
       toolName: a["tool_name"] as string, success: a["success"] as boolean,
       decision: a["decision"] as string, since: a["since"] as string,
-      limit: a["limit"] as number,
+      limit: a["limit"] as number, sessionId: a["session_id"] as string,
+      agentId: a["agent_id"] as string,
     }),
   },
   {
@@ -115,6 +118,42 @@ export const TOOLS: Tool[] = [
       breakdown: a["breakdown"] as string, where: a["where"] as string,
       since: a["since"] as string, until: a["until"] as string, limit: a["limit"] as number,
     }),
+  },
+  {
+    name: "telemetry_workflows",
+    description:
+      "Workflow runs with the agents they actually spawned, and the measured " +
+      "token and dollar cost of those agents.",
+    inputSchema: obj({ since: S, session_id: S, limit: I }),
+    run: (db, a) => Q.workflows(db, {
+      since: a["since"] as string, sessionId: a["session_id"] as string,
+      limit: a["limit"] as number,
+    }),
+  },
+  {
+    name: "telemetry_workflow",
+    description: "One workflow run, broken down by the agents that did the work.",
+    inputSchema: obj({ run_id: S }, ["run_id"]),
+    run: (db, a) => Q.workflowRun(db, { runId: a["run_id"] as string }),
+  },
+  {
+    name: "telemetry_agents",
+    description:
+      "Subagent runs with measured cost, from the transcripts each agent wrote. " +
+      "Filter by session, team or workflow run. Measured cost exists even for " +
+      "backgrounded agents that never reported totals to their caller.",
+    inputSchema: obj({ session_id: S, team: S, run_id: S, since: S, limit: I }),
+    run: (db, a) => Q.agents(db, {
+      sessionId: a["session_id"] as string, teamName: a["team"] as string,
+      workflowRunId: a["run_id"] as string, since: a["since"] as string,
+      limit: a["limit"] as number,
+    }),
+  },
+  {
+    name: "telemetry_teams",
+    description: "Named agent teams, their members and what they cost.",
+    inputSchema: obj({ since: S, limit: I }),
+    run: (db, a) => Q.teams(db, { since: a["since"] as string, limit: a["limit"] as number }),
   },
   {
     name: "telemetry_plugin_costs",

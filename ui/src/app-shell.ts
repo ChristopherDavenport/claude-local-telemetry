@@ -26,6 +26,8 @@ import "./views/view-tools.js";
 import "./views/view-plugins.js";
 import "./views/view-hooks.js";
 import "./views/view-query.js";
+import "./views/view-agents.js";
+import "./views/view-workflow.js";
 import "./views/view-traces.js";
 import "./views/view-trace.js";
 
@@ -40,6 +42,7 @@ const NAV: NavItem[] = [
   { href: "/", label: "Overview" },
   { href: "/cost", label: "Cost" },
   { href: "/sessions", label: "Sessions", prefix: "/sessions" },
+  { href: "/agents", label: "Agents", prefix: "/workflow" },
   { href: "/traces", label: "Traces", prefix: "/trace" },
   { href: "/tools", label: "Tools" },
   { href: "/plugins", label: "Plugins" },
@@ -149,6 +152,12 @@ export class TlApp extends LitElement {
       { path: "/plugins", render: () => html`<view-plugins></view-plugins>` },
       { path: "/hooks", render: () => html`<view-hooks></view-hooks>` },
       { path: "/query", render: () => html`<view-query></view-query>` },
+
+      { path: "/agents", render: () => html`<view-agents></view-agents>` },
+      {
+        path: "/workflow/:id",
+        render: ({ id }) => html`<view-workflow .runId=${id ?? ""}></view-workflow>`,
+      },
 
       { path: "/traces", render: () => html`<view-traces></view-traces>` },
       { path: "/traces/", render: () => html`<view-traces></view-traces>` },

@@ -17,10 +17,11 @@
  */
 
 import { html, css, nothing } from "lit";
-import { customElement } from "lit/decorators.js";
+import { customElement, state } from "lit/decorators.js";
 import "@jack-henry/jh-ui/components/card/card.js";
 import "@jack-henry/jh-ui/components/notification/notification.js";
 import "@jack-henry/jh-ui/components/tag/tag.js";
+import "@jack-henry/jh-ui/components/button/button.js";
 
 import { TlView } from "../view-base.js";
 import { api, type PluginCosts, type PluginHashRow, type InvocationRow } from "../api.js";
@@ -81,6 +82,27 @@ export class ViewPlugins extends TlView<PluginCosts> {
       }
     `,
   ];
+
+  /** Which hash was last copied, so the button can confirm it happened. */
+  @state() private copied: string | null = null;
+
+  /**
+   * The HTTP API is read-only by design — it is unauthenticated and bound to
+   * loopback, and adding a write route to un-blind a plugin is not worth
+   * changing that posture for. So this hands over the exact CLI command.
+   */
+  private async copyAlias(hash: string) {
+    const cmd = `claude-local-telemetry alias set ${hash} <name>`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      this.copied = hash;
+      setTimeout(() => { if (this.copied === hash) this.copied = null; }, 2000);
+    } catch {
+      // Clipboard access needs a secure context; loopback http qualifies, but a
+      // browser may still refuse. A prompt beats failing silently.
+      window.prompt("Run this, replacing <name>:", cmd);
+    }
+  }
 
   protected override fetchData(signal: AbortSignal): Promise<PluginCosts> {
     return api.plugins(signal);
@@ -183,6 +205,17 @@ export class ViewPlugins extends TlView<PluginCosts> {
         padding="medium"
         show-header-divider
       >
+        <p class="panel-note">
+          ${unresolved > 0
+            ? html`${unresolved} unmapped. <code>claude-local-telemetry alias derive</code> learns a
+                name wherever OTel logged a hash for a request a transcript also named, and reports
+                anything ambiguous rather than guessing. Copy prepares the command for one row.`
+            : d.pluginHashes.length
+              ? html`Every hash is named.`
+              : html`No plugin hashes in the store. They arrive only from the OTLP sink — a
+                  transcript names its plugin directly and never carries a hash, so there is
+                  nothing here to map.`}
+        </p>
         <tl-table .columns=${this.hashColumns()} .rows=${d.pluginHashes}></tl-table>
       </jh-card>
     `;
@@ -215,6 +248,20 @@ export class ViewPlugins extends TlView<PluginCosts> {
           >`,
       },
       { key: "marketplace", label: "Marketplace" },
+      {
+        key: "cmd",
+        label: "",
+        sortable: false,
+        render: (r: PluginHashRow) =>
+          r.resolved || !r.plugin_id_hash
+            ? nothing
+            : html`<jh-button
+                size="small"
+                appearance="tertiary"
+                label=${this.copied === r.plugin_id_hash ? "Copied" : "Copy alias cmd"}
+                @click=${() => void this.copyAlias(r.plugin_id_hash as string)}
+              ></jh-button>`,
+      },
       {
         key: "skill_count",
         label: "Skills",

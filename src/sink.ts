@@ -100,8 +100,8 @@ INSERT INTO api_requests (
     input_tokens, output_tokens, cache_read, cache_creation,
     duration_ms, query_source, speed, effort,
     agent_name, skill_name, plugin_name, marketplace_name, plugin_resolved,
-    mcp_server, mcp_tool, cwd, git_branch, source
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    mcp_server, mcp_tool, cwd, git_branch, source, plugin_id_hash
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(request_id) DO UPDATE SET
     cost_usd       = COALESCE(excluded.cost_usd, api_requests.cost_usd),
     duration_ms    = COALESCE(excluded.duration_ms, api_requests.duration_ms),
@@ -111,6 +111,7 @@ ON CONFLICT(request_id) DO UPDATE SET
     agent_name     = COALESCE(excluded.agent_name, api_requests.agent_name),
     skill_name     = COALESCE(excluded.skill_name, api_requests.skill_name),
     plugin_name    = COALESCE(excluded.plugin_name, api_requests.plugin_name),
+    plugin_id_hash = COALESCE(api_requests.plugin_id_hash, excluded.plugin_id_hash),
     input_tokens   = COALESCE(api_requests.input_tokens, excluded.input_tokens),
     output_tokens  = COALESCE(api_requests.output_tokens, excluded.output_tokens),
     cache_read     = COALESCE(api_requests.cache_read, excluded.cache_read),
@@ -191,7 +192,7 @@ export function handleLogs(db: DatabaseSync, payload: Record<string, unknown>): 
             str(a["agent.name"]), str(a["skill.name"]), str(a["plugin.name"]),
             str(a["marketplace.name"]), resolvePlugin(db, a),
             str(a["mcp_server.name"]), str(a["mcp_tool.name"]),
-            null, null, "otel");
+            null, null, "otel", str(a["plugin_id_hash"]));
         } else if (name === "tool_result" || name === "tool_decision") {
           const tid = str(a["tool_use_id"]);
           if (tid) {

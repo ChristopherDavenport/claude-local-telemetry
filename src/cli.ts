@@ -8,6 +8,7 @@
  *   claude-local-telemetry mcp
  *   claude-local-telemetry stats
  *   claude-local-telemetry init
+ *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected
@@ -20,6 +21,7 @@ import { backfill } from "./backfill.ts";
 import { startSink } from "./sink.ts";
 import { startApi } from "./api.ts";
 import { serve as serveMcp } from "./mcp.ts";
+import * as Alias from "./alias.ts";
 
 function parse(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -44,6 +46,12 @@ const USAGE = `claude-local-telemetry <command>
   mcp        MCP server over stdio
   stats      what is in the store
   init       create or migrate the database
+
+  alias                        map plugin_id_hash to a real name (un-blinds spend)
+    alias list
+    alias derive               learn mappings where OTel and a transcript agree
+    alias set <hash> <name>    record one by hand
+    alias rm  <hash>
 
   --db PATH  override the store location (default: ${defaultDbPath()})
 `;
@@ -84,7 +92,9 @@ function main(): number {
         `  api_requests  ${String(r.api).padStart(8)}\n` +
         `  tool_calls    ${String(r.tools).padStart(8)}\n` +
         `  sessions      ${String(r.sessions).padStart(8)}\n` +
-        `  skill/agent   ${String(r.skills).padStart(8)}\n`);
+        `  skill/agent   ${String(r.skills).padStart(8)}\n` +
+        `  agent_runs    ${String(r.agents).padStart(8)}\n` +
+        `  workflow_runs ${String(r.workflows).padStart(8)}\n`);
       return 0;
     }
     case "sink": {
@@ -104,6 +114,56 @@ function main(): number {
         ...(typeof flags["ui"] === "string" ? { uiDir: flags["ui"] } : {}),
       });
       return -1;
+    }
+    case "alias": {
+      // Writes, so it opens through init() rather than a read-only handle.
+      const conn = init(db);
+      try {
+        const sub = rest[1] ?? "list";
+        if (sub === "list") {
+          const rows = Alias.list(conn);
+          if (!rows.length) {
+            process.stdout.write("no aliases yet. Try: alias derive\n");
+            return 0;
+          }
+          for (const r of rows) {
+            process.stdout.write(
+              `  ${r.plugin_id_hash.padEnd(20)} ${String(r.plugin_name).padEnd(28)} ${r.confidence}\n`);
+          }
+          return 0;
+        }
+        if (sub === "derive") {
+          const r = Alias.derive(conn);
+          const applied = Alias.apply(conn);
+          process.stdout.write(
+            `learned ${r.learned} mapping(s); ${r.hashesResolved}/${r.hashesSeen} hashes now named\n` +
+            `  ${applied} previously blinded requests attributed\n`);
+          for (const a of r.ambiguous) {
+            process.stdout.write(
+              `  ambiguous ${a.plugin_id_hash}: ${a.names.join(" | ")} — settle with \`alias set\`\n`);
+          }
+          if (!r.hashesSeen) {
+            process.stdout.write(
+              "  no plugin_id_hash in the store: that only arrives from the OTLP sink.\n");
+          }
+          return 0;
+        }
+        if (sub === "set") {
+          const [, , hash, name] = rest;
+          if (!hash || !name) { process.stdout.write("usage: alias set <hash> <name>\n"); return 1; }
+          Alias.set(conn, { hash, name });
+          process.stdout.write(`${hash} -> ${name}\n  ${Alias.apply(conn)} requests attributed\n`);
+          return 0;
+        }
+        if (sub === "rm") {
+          const hash = rest[2];
+          if (!hash) { process.stdout.write("usage: alias rm <hash>\n"); return 1; }
+          process.stdout.write(`removed ${Alias.remove(conn, hash)}\n`);
+          return 0;
+        }
+        process.stdout.write(`unknown: alias ${sub}\n`);
+        return 1;
+      } finally { conn.close(); }
     }
     case "mcp": {
       serveMcp(db);

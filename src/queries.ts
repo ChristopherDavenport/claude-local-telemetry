@@ -38,7 +38,17 @@ const COST_GROUPS: Record<string, string> = {
   git_branch: "git_branch",
   speed: "speed",
   effort: "effort",
+  // Added with schema v2. "what did each agent cost" is the first question the
+  // agent data invites, and without these it could only be answered through
+  // run_query — which returns one aggregate, not the cost-and-token breakdown
+  // this returns per row.
+  agent_id: "agent_id",
+  workflow_run_id: "workflow_run_id",
+  plugin_id_hash: "plugin_id_hash",
 };
+
+/** Exported for the test that runs every advertised option against a store. */
+export const COST_GROUPS_FOR_TEST = COST_GROUPS;
 
 const SELECT_ONLY = /^\s*select\b/i;
 const FORBIDDEN =
@@ -63,7 +73,8 @@ export function overview(db: DatabaseSync) {
 }
 
 export function cost(db: DatabaseSync, o: {
-  groupBy?: string | undefined; since?: string | undefined; until?: string | undefined; limit?: number | undefined;
+  groupBy?: string | undefined; since?: string | undefined; until?: string | undefined;
+  limit?: number | undefined; sessionId?: string | undefined;
 } = {}) {
   const key = o.groupBy ?? "model";
   const col = COST_GROUPS[key];
@@ -71,6 +82,7 @@ export function cost(db: DatabaseSync, o: {
   const where = ["1=1"]; const params: unknown[] = [];
   if (o.since) { where.push("ts >= ?"); params.push(o.since); }
   if (o.until) { where.push("ts <= ?"); params.push(o.until); }
+  if (o.sessionId) { where.push("session_id = ?"); params.push(o.sessionId); }
   const limit = o.limit ?? 50;
   const sql =
     `SELECT ${col} AS grp, count(*) AS n, sum(cost_usd) AS cost_usd,` +
@@ -83,9 +95,13 @@ export function cost(db: DatabaseSync, o: {
 
 export function sessions(db: DatabaseSync, o: {
   since?: string | undefined; cwdLike?: string | undefined; limit?: number | undefined;
+  sessionId?: string | undefined;
 } = {}) {
   const where = ["1=1"]; const params: unknown[] = [];
   if (o.since) { where.push("s.started_at >= ?"); params.push(o.since); }
+  // Parameterised, not interpolated. Before this the dashboard's session page
+  // had to build `where=session_id='…'` as a string and guard it with a regex.
+  if (o.sessionId) { where.push("s.session_id = ?"); params.push(o.sessionId); }
   if (o.cwdLike) { where.push("COALESCE(s.cwd, a.cwd) LIKE ?"); params.push(`%${o.cwdLike}%`); }
   const limit = o.limit ?? 25;
   const sql = `
@@ -102,9 +118,13 @@ export function sessions(db: DatabaseSync, o: {
 }
 
 export function toolAudit(db: DatabaseSync, o: {
-  toolName?: string | undefined; success?: boolean | undefined; decision?: string | undefined; since?: string | undefined; limit?: number | undefined;
+  toolName?: string | undefined; success?: boolean | undefined; decision?: string | undefined;
+  since?: string | undefined; limit?: number | undefined;
+  sessionId?: string | undefined; agentId?: string | undefined;
 } = {}) {
   const where = ["1=1"]; const params: unknown[] = [];
+  if (o.sessionId) { where.push("session_id = ?"); params.push(o.sessionId); }
+  if (o.agentId) { where.push("agent_id = ?"); params.push(o.agentId); }
   if (o.toolName) { where.push("tool_name = ?"); params.push(o.toolName); }
   if (o.success !== undefined) { where.push("success = ?"); params.push(o.success ? 1 : 0); }
   if (o.decision) { where.push("decision = ?"); params.push(o.decision); }
@@ -342,6 +362,148 @@ export function runQuery(db: DatabaseSync, o: {
   const sql = `SELECT ${grp ? `${grp} AS grp, ` : ""}${AGGS[calc]} AS value FROM ${table}` +
     ` WHERE ${clauses.join(" AND ")}${grp ? " GROUP BY grp ORDER BY value DESC" : ""} LIMIT ?`;
   return { table, calculate: calc, breakdown: grp ?? null, rows: all(db, sql, [...params, limit], limit) };
+}
+
+/* ------------------------------------------------------------------ *
+ * Agents, teams and workflows.
+ *
+ * Two different things are called "an agent run" here and they should not be
+ * conflated:
+ *
+ * - **Reported** — `agent_runs`, one row per spawn as the *parent* saw it. It
+ *   has the agent's type, team and model, and for a synchronous agent the
+ *   totals it returned. A backgrounded agent acknowledges and never reports,
+ *   so those totals are frequently null.
+ * - **Measured** — `api_requests` tagged with `agent_id` from the transcript
+ *   the agent actually wrote. This exists whether or not anything was reported,
+ *   and it is the number to trust.
+ *
+ * The two id spaces do not use one format. A plain agent's transcript is named
+ * for the same id the parent reported, so those join directly. A named teammate
+ * is reported as `name@team` but files its transcript as `a<name>-<hash>`, so
+ * those join on the label instead — a rule that resolved all 49 team members on
+ * a real corpus, against 128 of 366 for exact matching alone.
+ *
+ * Queries lead with the measured side regardless, and treat the reported
+ * metadata as enrichment that may be absent, rather than inner-joining and
+ * silently dropping the agents whose ids do not line up.
+ * ------------------------------------------------------------------ */
+
+/** Does spawn row `r` describe the agent that wrote request row `a`? */
+const MATCHES_AGENT =
+  "(r.agent_id = a.agent_id OR (r.label IS NOT NULL AND a.agent_id LIKE 'a' || r.label || '-%'))";
+
+/** Totals for an agent-tagged slice; input includes cache, which dominates. */
+const AGENT_TOTALS =
+  " count(*) AS requests, sum(a.cost_usd) AS cost_usd," +
+  " sum(COALESCE(a.input_tokens,0) + COALESCE(a.cache_read,0) + COALESCE(a.cache_creation,0)) AS input_tokens," +
+  " sum(a.output_tokens) AS output_tokens, min(a.ts) AS started_at, max(a.ts) AS ended_at";
+
+export function workflows(db: DatabaseSync, o: {
+  since?: string | undefined; sessionId?: string | undefined; limit?: number | undefined;
+} = {}) {
+  const where = ["1=1"]; const params: unknown[] = [];
+  if (o.since) { where.push("w.ts >= ?"); params.push(o.since); }
+  if (o.sessionId) { where.push("w.session_id = ?"); params.push(o.sessionId); }
+  const limit = o.limit ?? 50;
+  const rows = all(db,
+    "SELECT w.run_id, w.ts AS started_at, w.name, w.session_id, w.script_path, w.summary," +
+    " (SELECT count(DISTINCT a.agent_id) FROM api_requests a WHERE a.workflow_run_id = w.run_id) AS agents," +
+    " (SELECT count(*) FROM api_requests a WHERE a.workflow_run_id = w.run_id) AS requests," +
+    " (SELECT sum(a.cost_usd) FROM api_requests a WHERE a.workflow_run_id = w.run_id) AS cost_usd," +
+    " (SELECT sum(COALESCE(a.input_tokens,0)+COALESCE(a.cache_read,0)+COALESCE(a.cache_creation,0))" +
+    "    FROM api_requests a WHERE a.workflow_run_id = w.run_id) AS input_tokens," +
+    " (SELECT sum(a.output_tokens) FROM api_requests a WHERE a.workflow_run_id = w.run_id) AS output_tokens" +
+    ` FROM workflow_runs w WHERE ${where.join(" AND ")} ORDER BY w.ts DESC LIMIT ?`,
+    [...params, limit], limit);
+  return {
+    rows,
+    note: rows.length ? undefined : (
+      "no workflow runs recorded. The Workflow tool writes its agents under " +
+      "<project>/<session>/subagents/workflows/<runId>/, and backfill reads the run " +
+      "id from that path; a store built before v2 will not have it until you re-run backfill."
+    ),
+  };
+}
+
+/** One workflow run, broken down by the agents that actually did the work. */
+export function workflowRun(db: DatabaseSync, o: { runId?: string | undefined }) {
+  if (!o.runId) throw new Error("pass runId");
+  const run = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(o.runId) as Row | undefined;
+  const agents = all(db,
+    `SELECT a.agent_id, ${AGENT_TOTALS},` +
+    " (SELECT r.agent_type FROM agent_runs r WHERE r.agent_id = a.agent_id) AS agent_type," +
+    " (SELECT r.label FROM agent_runs r WHERE r.agent_id = a.agent_id) AS label" +
+    " FROM api_requests a WHERE a.workflow_run_id = ?" +
+    " GROUP BY a.agent_id ORDER BY input_tokens DESC", [o.runId], 200);
+  const tools = all(db,
+    "SELECT tool_name, count(*) AS n FROM tool_calls WHERE workflow_run_id = ?" +
+    " GROUP BY tool_name ORDER BY n DESC", [o.runId], 25);
+  return { run: run ?? null, agentCount: agents.length, agents, tools };
+}
+
+/**
+ * Agent runs, measured first.
+ *
+ * Starts from the requests each agent made and left-joins what the parent
+ * reported, so a backgrounded agent that never reported still appears with its
+ * real cost.
+ */
+export function agents(db: DatabaseSync, o: {
+  sessionId?: string | undefined; teamName?: string | undefined;
+  workflowRunId?: string | undefined; since?: string | undefined; limit?: number | undefined;
+} = {}) {
+  const where = ["a.agent_id IS NOT NULL"]; const params: unknown[] = [];
+  if (o.since) { where.push("a.ts >= ?"); params.push(o.since); }
+  if (o.sessionId) { where.push("a.session_id = ?"); params.push(o.sessionId); }
+  if (o.workflowRunId) { where.push("a.workflow_run_id = ?"); params.push(o.workflowRunId); }
+  if (o.teamName) {
+    where.push(`EXISTS (SELECT 1 FROM agent_runs r WHERE r.team_name = ? AND ${MATCHES_AGENT})`);
+    params.push(o.teamName);
+  }
+  const limit = o.limit ?? 50;
+
+  // Metadata comes from correlated subqueries rather than a LEFT JOIN. The
+  // match rule can hit more than one spawn row, and a join that multiplies rows
+  // would silently inflate every sum in AGENT_TOTALS.
+  const meta = (col: string) =>
+    `(SELECT r.${col} FROM agent_runs r WHERE ${MATCHES_AGENT} LIMIT 1) AS ${col}`;
+  const rows = all(db,
+    `SELECT a.agent_id, a.session_id, a.workflow_run_id, ${AGENT_TOTALS},` +
+    ` ${meta("agent_type")}, ${meta("label")}, ${meta("team_name")}, ${meta("model")},` +
+    ` ${meta("status")},` +
+    ` (SELECT r.total_tokens FROM agent_runs r WHERE ${MATCHES_AGENT} LIMIT 1) AS reported_tokens` +
+    ` FROM api_requests a WHERE ${where.join(" AND ")}` +
+    " GROUP BY a.agent_id ORDER BY input_tokens DESC LIMIT ?",
+    [...params, limit], limit);
+
+  // Spawns the parent recorded that produced no measurable turns — a
+  // backgrounded agent still running, or one whose transcript is not on disk.
+  const unmeasured = db.prepare(
+    "SELECT count(*) AS n FROM agent_runs r WHERE NOT EXISTS" +
+    " (SELECT 1 FROM api_requests a WHERE " + MATCHES_AGENT + ")",
+  ).get() as { n: number };
+
+  return { rows, spawnsWithoutTurns: unmeasured.n };
+}
+
+/** Named agents grouped by the team they were spawned into. */
+export function teams(db: DatabaseSync, o: { since?: string | undefined; limit?: number | undefined } = {}) {
+  const where = ["r.team_name IS NOT NULL"]; const params: unknown[] = [];
+  if (o.since) { where.push("r.ts >= ?"); params.push(o.since); }
+  const limit = o.limit ?? 50;
+  const per = (expr: string) =>
+    `sum((SELECT ${expr} FROM api_requests a WHERE ${MATCHES_AGENT}))`;
+  const rows = all(db,
+    "SELECT r.team_name, count(*) AS members," +
+    " count(DISTINCT r.agent_type) AS agent_types, min(r.ts) AS started_at," +
+    ` ${per("count(*)")} AS requests,` +
+    ` ${per("sum(COALESCE(a.input_tokens,0)+COALESCE(a.cache_read,0)+COALESCE(a.cache_creation,0))")} AS input_tokens,` +
+    ` ${per("sum(a.output_tokens)")} AS output_tokens,` +
+    ` ${per("sum(a.cost_usd)")} AS cost_usd` +
+    ` FROM agent_runs r WHERE ${where.join(" AND ")}` +
+    " GROUP BY r.team_name ORDER BY members DESC LIMIT ?", [...params, limit], limit);
+  return { rows };
 }
 
 export function pluginCosts(db: DatabaseSync) {

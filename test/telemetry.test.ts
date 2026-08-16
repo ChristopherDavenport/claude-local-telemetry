@@ -17,10 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { init, openForRead, stats, TABLES } from "../src/store.ts";
-import { backfill } from "../src/backfill.ts";
+import { backfill, pathContext } from "../src/backfill.ts";
 import { handleLogs, handleTraces } from "../src/sink.ts";
 import * as Q from "../src/queries.ts";
 import { dispatch, TOOLS } from "../src/mcp.ts";
+import * as Alias from "../src/alias.ts";
 
 let work: string;
 let db: string;
@@ -230,12 +231,40 @@ test("every query returns and stays a reasonable size", () => {
       pluginCosts: () => Q.pluginCosts(d),
       hookHealth: () => Q.hookHealth(d),
       traces: () => Q.traces(d),
+      workflows: () => Q.workflows(d),
+      agents: () => Q.agents(d),
+      teams: () => Q.teams(d),
     })) {
       const size = JSON.stringify(fn()).length;
       assert.ok(size > 0, `${name} returned nothing`);
       assert.ok(size < 20000, `${name} default payload is ${size}B — too large for one call`);
     }
   });
+});
+
+/**
+ * The vocabularies are hand-maintained lists that have to track the schema, and
+ * schema v2 shipped with three new columns that `cost()` could not group by —
+ * so "what did each agent cost", the first question the new data invites, only
+ * worked through run_query. These execute every advertised option against a
+ * real store, so an option that names a column which does not exist fails here
+ * rather than in someone's tool call.
+ */
+test("every advertised group_by and table actually runs", () => {
+  q((d) => {
+    for (const g of Object.keys(Q.COST_GROUPS_FOR_TEST)) {
+      assert.doesNotThrow(() => Q.cost(d, { groupBy: g, limit: 1 }), `group_by ${g}`);
+    }
+    for (const t of TABLES) {
+      assert.doesNotThrow(() => Q.runQuery(d, { table: t, calculate: "count", limit: 1 }), `table ${t}`);
+    }
+  });
+});
+
+test("the v2 columns are reachable from the purpose-built tools", () => {
+  for (const g of ["agent_id", "workflow_run_id", "plugin_id_hash"]) {
+    assert.ok(g in Q.COST_GROUPS_FOR_TEST, `cost() cannot group by ${g}`);
+  }
 });
 
 test("the read-only guard refuses everything that is not a SELECT", () => {
@@ -280,6 +309,144 @@ test("stats reports source breakdown so the cost gap is visible", () => {
   const s = q((d) => stats(d));
   assert.ok(Object.keys(s.bySource).length > 0);
   assert.ok(s.rows["api_requests"]! > 0);
+});
+
+/* ------------------------------------------------------------------ *
+ * Agents, workflows and aliases.
+ * ------------------------------------------------------------------ */
+
+test("a transcript's path says which agent and workflow wrote it", () => {
+  const root = "/r";
+  assert.deepEqual(pathContext("/r/proj/sess.jsonl", root), {
+    kind: "main", parentSessionId: null, agentId: null, workflowRunId: null,
+  });
+  assert.deepEqual(pathContext("/r/proj/PARENT/subagents/agent-abc123.jsonl", root), {
+    kind: "agent", parentSessionId: "PARENT", agentId: "abc123", workflowRunId: null,
+  });
+  assert.deepEqual(
+    pathContext("/r/proj/PARENT/subagents/workflows/wf_9/agent-abc123.jsonl", root),
+    { kind: "agent", parentSessionId: "PARENT", agentId: "abc123", workflowRunId: "wf_9" },
+  );
+});
+
+/** A tiny project tree: one main session, one plain agent, one workflow agent. */
+function agentCorpus(): { root: string; db: string } {
+  const base = join(work, "agents");
+  const proj = join(base, "proj");
+  const PAR = "11111111-2222-3333-4444-555555555555";
+  mkdirSync(join(proj, PAR, "subagents", "workflows", "wf_test"), { recursive: true });
+
+  const turn = (sid: string, rid: string, extra: Record<string, unknown> = {}) => rec({
+    type: "assistant", uuid: `u-${rid}`, timestamp: ts(1), sessionId: sid, requestId: rid,
+    message: { role: "assistant", model: "m", usage: usage(10, 5), content: [] },
+    ...extra,
+  });
+
+  // Main session: a plain turn, plus one attributed to a plugin by the transcript.
+  writeFileSync(join(proj, `${PAR}.jsonl`), [
+    turn(PAR, "req_main"),
+    turn(PAR, "req_plugin", { attributionPlugin: "my-plugin", attributionSkill: "my-skill" }),
+  ].join("\n") + "\n");
+
+  // Both agents report the *parent's* sessionId, as real ones do.
+  writeFileSync(join(proj, PAR, "subagents", "agent-aworker-99.jsonl"),
+    turn(PAR, "req_agent") + "\n");
+  writeFileSync(join(proj, PAR, "subagents", "workflows", "wf_test", "agent-awf-1.jsonl"),
+    turn(PAR, "req_wf") + "\n");
+
+  const dbPath = join(base, "agents.db");
+  backfill({ root: base, db: dbPath, quiet: true });
+  return { root: base, db: dbPath };
+}
+
+test("subagent turns are tagged with their agent and workflow, not split into sessions", () => {
+  const { db: path } = agentCorpus();
+  const d = openForRead(path);
+  // Spread into a plain object: node:sqlite hands back null-prototype rows and
+  // deepEqual compares prototypes.
+  const row = (rid: string) => ({ ...d.prepare(
+    "SELECT session_id, query_source, agent_id, workflow_run_id FROM api_requests WHERE request_id=?",
+  ).get(rid) as Record<string, unknown> });
+
+  assert.deepEqual(row("req_main"),
+    { session_id: "11111111-2222-3333-4444-555555555555", query_source: "main",
+      agent_id: null, workflow_run_id: null });
+  assert.deepEqual(row("req_agent"),
+    { session_id: "11111111-2222-3333-4444-555555555555", query_source: "subagent",
+      agent_id: "aworker-99", workflow_run_id: null });
+  assert.deepEqual(row("req_wf"),
+    { session_id: "11111111-2222-3333-4444-555555555555", query_source: "subagent",
+      agent_id: "awf-1", workflow_run_id: "wf_test" });
+
+  // One session, not three: the agents share their parent's id.
+  const n = d.prepare("SELECT count(*) c FROM sessions").get() as { c: number };
+  assert.equal(n.c, 1, "an agent is not a session");
+  d.close();
+});
+
+test("transcripts supply the attribution OTel redacts", () => {
+  const { db: path } = agentCorpus();
+  const d = openForRead(path);
+  const r = d.prepare(
+    "SELECT plugin_resolved, skill_name FROM api_requests WHERE request_id='req_plugin'",
+  ).get() as Record<string, unknown>;
+  assert.equal(r["plugin_resolved"], "my-plugin");
+  assert.equal(r["skill_name"], "my-skill");
+  d.close();
+});
+
+test("aliases are derived from requests both sources described", () => {
+  const path = join(work, "alias.db");
+  const d = init(path);
+  // OTel saw a hash and the redacted name; a transcript named the same request.
+  d.prepare(
+    "INSERT INTO api_requests (request_id, ts, source, plugin_name, plugin_id_hash)" +
+    " VALUES ('r1', ?, 'otel', 'third-party', 'HASH_A')").run(ts(1));
+  d.prepare("UPDATE api_requests SET plugin_resolved='real-plugin' WHERE request_id='r1'").run();
+  // A second request with the same hash but no name yet: this is what gets fixed.
+  d.prepare(
+    "INSERT INTO api_requests (request_id, ts, source, plugin_name, plugin_id_hash)" +
+    " VALUES ('r2', ?, 'otel', 'third-party', 'HASH_A')").run(ts(2));
+  // A hash the two sources disagree about must not be guessed at.
+  for (const [rid, name] of [["r3", "one"], ["r4", "two"]]) {
+    d.prepare(
+      "INSERT INTO api_requests (request_id, ts, source, plugin_id_hash, plugin_resolved)" +
+      " VALUES (?, ?, 'otel', 'HASH_B', ?)").run(rid!, ts(3), name!);
+  }
+
+  const out = Alias.derive(d, ts(4));
+  assert.equal(out.learned, 1);
+  assert.deepEqual(out.ambiguous, [{ plugin_id_hash: "HASH_B", names: ["one", "two"] }]);
+
+  assert.equal(Alias.apply(d), 1, "the blinded request gains the name");
+  const r2 = d.prepare("SELECT plugin_resolved FROM api_requests WHERE request_id='r2'")
+    .get() as { plugin_resolved: string };
+  assert.equal(r2.plugin_resolved, "real-plugin");
+
+  // A hand-written mapping outranks a derived one and survives re-derivation.
+  Alias.set(d, { hash: "HASH_B", name: "settled" });
+  Alias.derive(d, ts(5));
+  const b = Alias.list(d).find((a) => a.plugin_id_hash === "HASH_B");
+  assert.equal(b?.plugin_name, "settled");
+  assert.equal(b?.confidence, "manual");
+  d.close();
+});
+
+test("a v1 store gains the v2 columns without losing rows", () => {
+  const path = join(work, "v1.db");
+  const d = init(path);
+  d.exec("INSERT INTO api_requests (request_id, ts, source) VALUES ('keep', '2026-01-01T00:00:00Z', 'otel')");
+  // Simulate v1: drop the added columns' knowledge by rewinding the version.
+  d.prepare("UPDATE meta SET value='1' WHERE key='schema_version'").run();
+  d.close();
+
+  assert.throws(() => openForRead(path), /schema v1.*needs v2/s);
+  init(path).close();
+  const re = openForRead(path);
+  const r = re.prepare("SELECT count(*) c FROM api_requests WHERE request_id='keep'")
+    .get() as { c: number };
+  assert.equal(r.c, 1, "migration preserved existing rows");
+  re.close();
 });
 
 /* ------------------------------------------------------------------ *

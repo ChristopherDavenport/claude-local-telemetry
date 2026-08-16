@@ -34,13 +34,16 @@ function routes(dbPath?: string): Record<string, Handler> {
     "/api/cost": (p) => withDb((db) => Q.cost(db, {
       groupBy: s(p.get("group_by")), since: s(p.get("since")),
       until: s(p.get("until")), limit: num(p.get("limit")),
+      sessionId: s(p.get("session_id")),
     }))(),
     "/api/sessions": (p) => withDb((db) => Q.sessions(db, {
       since: s(p.get("since")), cwdLike: s(p.get("cwd_like")), limit: num(p.get("limit")),
+      sessionId: s(p.get("session_id")),
     }))(),
     "/api/tools": (p) => withDb((db) => Q.toolAudit(db, {
       toolName: s(p.get("tool_name")), decision: s(p.get("decision")),
       since: s(p.get("since")), limit: num(p.get("limit")),
+      sessionId: s(p.get("session_id")), agentId: s(p.get("agent_id")),
       ...(p.get("success") == null ? {} : { success: p.get("success") === "true" }),
     }))(),
     "/api/traces": (p) => withDb((db) => Q.traces(db, {
@@ -61,6 +64,17 @@ function routes(dbPath?: string): Record<string, Handler> {
     // opening a new hole.
     "/api/sql": (p) => withDb((db) => Q.sql(db, {
       query: s(p.get("query")), limit: num(p.get("limit")),
+    }))(),
+    "/api/workflows": (p) => withDb((db) => Q.workflows(db, {
+      since: s(p.get("since")), sessionId: s(p.get("session_id")), limit: num(p.get("limit")),
+    }))(),
+    "/api/workflow": (p) => withDb((db) => Q.workflowRun(db, { runId: s(p.get("run_id")) }))(),
+    "/api/agents": (p) => withDb((db) => Q.agents(db, {
+      sessionId: s(p.get("session_id")), teamName: s(p.get("team")),
+      workflowRunId: s(p.get("run_id")), since: s(p.get("since")), limit: num(p.get("limit")),
+    }))(),
+    "/api/teams": (p) => withDb((db) => Q.teams(db, {
+      since: s(p.get("since")), limit: num(p.get("limit")),
     }))(),
     "/api/plugins": withDb((db) => Q.pluginCosts(db)),
     "/api/hooks": (p) => withDb((db) => Q.hookHealth(db, {

@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export function defaultDbPath(): string {
   return process.env["CLAUDE_TELEMETRY_DB"]
@@ -46,7 +46,27 @@ export function defaultDbPath(): string {
 export const TABLES = [
   "api_requests", "tool_calls", "events", "spans", "metrics",
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
+  "agent_runs", "workflow_runs",
 ] as const;
+
+/**
+ * Columns added after v1.
+ *
+ * A missing *table* is caught by the TABLES check; a missing *column* is not,
+ * and would surface as `no such column: agent_id` from inside a query. These
+ * are applied by `init()` and asserted by `openForRead()` via schema_version.
+ *
+ * They hang off the *turn* rather than the session on purpose. A subagent
+ * transcript carries its parent's `sessionId` — measured on a real corpus, 366
+ * of 375 do, and the remaining 9 carry none — so an agent is not a session and
+ * `sessions.parent_session_id` would have been self-referential. What an agent
+ * actually owns is a set of requests and tool calls.
+ */
+const V2_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
+  api_requests: [["agent_id", "TEXT"], ["workflow_run_id", "TEXT"],
+                 ["plugin_id_hash", "TEXT"]],
+  tool_calls: [["agent_id", "TEXT"], ["workflow_run_id", "TEXT"]],
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -78,8 +98,21 @@ CREATE TABLE IF NOT EXISTS api_requests (
     mcp_tool         TEXT,
     cwd              TEXT,
     git_branch       TEXT,
-    source           TEXT NOT NULL
+    source           TEXT NOT NULL,
+    -- Which subagent made this call, and which workflow run it belonged to.
+    -- Derived from the transcript's path. query_source says main vs subagent;
+    -- these say *which* one. This is measured agent cost, as opposed to the
+    -- totals the parent reported in agent_runs.
+    agent_id         TEXT,
+    workflow_run_id  TEXT,
+    -- OTel knows the hash but not the name; the transcript knows the name but
+    -- not the hash. Storing the hash on the request is what lets the two be
+    -- joined on request_id to learn the mapping, instead of guessing it.
+    plugin_id_hash   TEXT
 ) STRICT;
+CREATE INDEX IF NOT EXISTS ix_api_agent   ON api_requests(agent_id);
+CREATE INDEX IF NOT EXISTS ix_api_hash    ON api_requests(plugin_id_hash);
+CREATE INDEX IF NOT EXISTS ix_api_wf      ON api_requests(workflow_run_id);
 CREATE INDEX IF NOT EXISTS ix_api_ts      ON api_requests(ts);
 CREATE INDEX IF NOT EXISTS ix_api_session ON api_requests(session_id);
 CREATE INDEX IF NOT EXISTS ix_api_model   ON api_requests(model);
@@ -106,8 +139,11 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     mcp_scope       TEXT,
     cwd             TEXT,
     source          TEXT NOT NULL,
+    agent_id        TEXT,
+    workflow_run_id TEXT,
     UNIQUE(tool_use_id, source)
 ) STRICT;
+CREATE INDEX IF NOT EXISTS ix_tool_agent ON tool_calls(agent_id);
 CREATE INDEX IF NOT EXISTS ix_tool_ts   ON tool_calls(ts);
 CREATE INDEX IF NOT EXISTS ix_tool_name ON tool_calls(tool_name);
 CREATE INDEX IF NOT EXISTS ix_tool_sess ON tool_calls(session_id);
@@ -162,6 +198,42 @@ CREATE TABLE IF NOT EXISTS sessions (
     source      TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS ix_sess_started ON sessions(started_at);
+
+-- The spawn as the *parent* saw it, which is not the same thing as the agent's
+-- transcript and can exist without one: a backgrounded agent returns an
+-- acknowledgement immediately and its totals never come back to the caller.
+-- agent_type, team_name and the usage totals only exist here.
+CREATE TABLE IF NOT EXISTS agent_runs (
+    agent_id          TEXT PRIMARY KEY,
+    ts                TEXT NOT NULL,
+    parent_session_id TEXT,
+    workflow_run_id   TEXT,
+    agent_type        TEXT,
+    label             TEXT,
+    team_name         TEXT,
+    model             TEXT,
+    status            TEXT,
+    is_async          INTEGER,
+    description       TEXT,
+    total_tokens      INTEGER,
+    duration_ms       INTEGER,
+    tool_uses         INTEGER,
+    source            TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_agent_parent ON agent_runs(parent_session_id);
+CREATE INDEX IF NOT EXISTS ix_agent_team   ON agent_runs(team_name);
+CREATE INDEX IF NOT EXISTS ix_agent_wf     ON agent_runs(workflow_run_id);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    run_id      TEXT PRIMARY KEY,
+    ts          TEXT NOT NULL,
+    name        TEXT,
+    session_id  TEXT,
+    script_path TEXT,
+    summary     TEXT,
+    source      TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_wf_session ON workflow_runs(session_id);
 
 -- plugin_loaded, one row per (plugin, session). Raw material for the
 -- hash -> real-name map, because OTel will not give us the name directly.
@@ -236,9 +308,35 @@ export function connect(dbPath?: string, opts: OpenOptions = {}): DatabaseSync {
   return db;
 }
 
+/** Columns of a table that already exists. */
+function columnsOf(db: DatabaseSync, table: string): Set<string> {
+  return new Set(
+    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+      .map((r) => r.name),
+  );
+}
+
+/**
+ * Bring an existing store up to the current schema.
+ *
+ * `CREATE TABLE IF NOT EXISTS` handles new tables but says nothing about new
+ * columns on an old one, so those are added explicitly. SQLite's
+ * `ADD COLUMN` is O(1) and does not rewrite the table, and every added column
+ * is nullable with no default, so existing rows stay valid under STRICT.
+ */
+function migrate(db: DatabaseSync): void {
+  for (const [table, cols] of Object.entries(V2_COLUMNS)) {
+    const have = columnsOf(db, table);
+    for (const [name, decl] of cols) {
+      if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+    }
+  }
+}
+
 export function init(dbPath?: string): DatabaseSync {
   const db = connect(dbPath);
   db.exec(SCHEMA);
+  migrate(db);
   db.prepare(
     "INSERT INTO meta(key, value) VALUES('schema_version', ?) " +
     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -273,6 +371,22 @@ export function openForRead(dbPath?: string): DatabaseSync {
       `${path} predates this version — missing ${missing.join(", ")}. ` +
       `Run: claude-local-telemetry init --db ${path}  (idempotent; adds the new tables ` +
       "and leaves existing rows alone)",
+    );
+  }
+
+  // A store can have every table and still predate a column. That failure would
+  // otherwise surface from inside a query as `no such column`, which tells the
+  // reader nothing about what to do; a read-only handle cannot migrate itself.
+  const version = Number(
+    (db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as
+      { value: string } | undefined)?.value ?? 0,
+  );
+  if (version < SCHEMA_VERSION) {
+    db.close();
+    throw new Error(
+      `${path} is schema v${version || "0"}; this build needs v${SCHEMA_VERSION}. ` +
+      `Run: claude-local-telemetry init --db ${path}  (idempotent; adds the new columns ` +
+      "and leaves existing rows alone). Re-run backfill afterwards to populate them.",
     );
   }
   return db;

@@ -142,6 +142,77 @@ export interface QueryResult {
   rows: QueryRow[];
 }
 
+/* ------------------------------------------------------------------ *
+ * Agents, teams and workflows.
+ *
+ * Every token figure here is *measured* — summed from the requests the agent's
+ * own transcript recorded — rather than the totals the spawning call reported.
+ * `reported_tokens` is the reported figure, kept alongside so the two can be
+ * compared; it is null for any agent that was backgrounded and never came back.
+ * ------------------------------------------------------------------ */
+
+export interface WorkflowRow {
+  run_id: string;
+  started_at: string;
+  name: string | null;
+  session_id: string | null;
+  script_path: string | null;
+  summary: string | null;
+  agents: number;
+  requests: number;
+  cost_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+}
+
+export interface WorkflowList {
+  rows: WorkflowRow[];
+  note?: string;
+}
+
+export interface AgentRow {
+  agent_id: string;
+  session_id: string | null;
+  workflow_run_id: string | null;
+  requests: number;
+  cost_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  agent_type: string | null;
+  label: string | null;
+  team_name: string | null;
+  model: string | null;
+  status: string | null;
+  reported_tokens: number | null;
+}
+
+export interface AgentList {
+  rows: AgentRow[];
+  /** Spawns the parent recorded that produced no measurable turns. */
+  spawnsWithoutTurns: number;
+}
+
+export interface WorkflowDetail {
+  run: Record<string, unknown> | null;
+  agentCount: number;
+  agents: Array<Pick<AgentRow, "agent_id" | "requests" | "cost_usd" | "input_tokens"
+    | "output_tokens" | "started_at" | "ended_at" | "agent_type" | "label">>;
+  tools: Array<{ tool_name: string | null; n: number }>;
+}
+
+export interface TeamRow {
+  team_name: string;
+  members: number;
+  agent_types: number;
+  started_at: string | null;
+  requests: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+}
+
 export interface PluginCostRow {
   plugin: string | null;
   n: number;
@@ -250,27 +321,57 @@ type Opt<T> = T | undefined;
 export const api = {
   overview: (signal?: AbortSignal) => get<Overview>("overview", {}, signal),
 
-  cost: (o: Range & { groupBy?: Opt<string>; limit?: Opt<number> } = {}, signal?: AbortSignal) =>
+  cost: (
+    o: Range & { groupBy?: Opt<string>; limit?: Opt<number>; sessionId?: Opt<string> } = {},
+    signal?: AbortSignal,
+  ) =>
     get<CostResult>("cost", {
       group_by: o.groupBy, since: o.since, until: o.until, limit: o.limit,
+      session_id: o.sessionId,
     }, signal),
 
   sessions: (
-    o: { since?: Opt<string>; cwdLike?: Opt<string>; limit?: Opt<number> } = {},
+    o: { since?: Opt<string>; cwdLike?: Opt<string>; limit?: Opt<number>;
+         sessionId?: Opt<string> } = {},
     signal?: AbortSignal,
   ) =>
     get<{ rows: SessionRow[] }>("sessions", {
-      since: o.since, cwd_like: o.cwdLike, limit: o.limit,
+      since: o.since, cwd_like: o.cwdLike, limit: o.limit, session_id: o.sessionId,
     }, signal),
 
   tools: (o: {
     toolName?: Opt<string>; decision?: Opt<string>; success?: Opt<boolean>;
     since?: Opt<string>; limit?: Opt<number>;
+    sessionId?: Opt<string>; agentId?: Opt<string>;
   } = {}, signal?: AbortSignal) =>
     get<ToolAudit>("tools", {
       tool_name: o.toolName, decision: o.decision, success: o.success,
       since: o.since, limit: o.limit,
+      session_id: o.sessionId, agent_id: o.agentId,
     }, signal),
+
+  workflows: (
+    o: { since?: Opt<string>; sessionId?: Opt<string>; limit?: Opt<number> } = {},
+    signal?: AbortSignal,
+  ) =>
+    get<WorkflowList>("workflows", {
+      since: o.since, session_id: o.sessionId, limit: o.limit,
+    }, signal),
+
+  workflow: (o: { runId: string }, signal?: AbortSignal) =>
+    get<WorkflowDetail>("workflow", { run_id: o.runId }, signal),
+
+  agents: (o: {
+    sessionId?: Opt<string>; team?: Opt<string>; runId?: Opt<string>;
+    since?: Opt<string>; limit?: Opt<number>;
+  } = {}, signal?: AbortSignal) =>
+    get<AgentList>("agents", {
+      session_id: o.sessionId, team: o.team, run_id: o.runId,
+      since: o.since, limit: o.limit,
+    }, signal),
+
+  teams: (o: { since?: Opt<string>; limit?: Opt<number> } = {}, signal?: AbortSignal) =>
+    get<{ rows: TeamRow[] }>("teams", { since: o.since, limit: o.limit }, signal),
 
   traces: (
     o: { since?: Opt<string>; sessionId?: Opt<string>; limit?: Opt<number> } = {},
@@ -318,11 +419,13 @@ export const api = {
 export const COST_GROUPS = [
   "day", "hour", "model", "query_source", "plugin_resolved", "skill_name",
   "agent_name", "session_id", "cwd", "git_branch", "speed", "effort",
+  "agent_id", "workflow_run_id", "plugin_id_hash",
 ] as const;
 
 export const TABLES = [
   "api_requests", "tool_calls", "events", "spans", "metrics",
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
+  "agent_runs", "workflow_runs",
 ] as const;
 
 export const AGGS = [
@@ -336,8 +439,12 @@ export const BREAKDOWNS: Record<string, readonly string[]> = {
   api_requests: [
     "model", "query_source", "plugin_resolved", "skill_name", "agent_name",
     "speed", "effort", "cwd", "git_branch", "source", "mcp_server", "mcp_tool",
+    "agent_id", "workflow_run_id", "plugin_id_hash",
   ],
-  tool_calls: ["tool_name", "decision", "decision_source", "error_type", "success", "cwd", "source"],
+  tool_calls: [
+    "tool_name", "decision", "decision_source", "error_type", "success", "cwd", "source",
+    "agent_id", "workflow_run_id",
+  ],
   events: ["name", "source"],
   spans: ["name"],
   metrics: ["name"],
@@ -345,4 +452,6 @@ export const BREAKDOWNS: Record<string, readonly string[]> = {
   plugin_loads: ["plugin_name", "marketplace", "scope", "version"],
   plugin_alias: ["plugin_name", "marketplace", "confidence"],
   hook_runs: ["hook_name", "hook_event", "hook_source"],
+  agent_runs: ["agent_type", "team_name", "model", "status", "label", "workflow_run_id", "source"],
+  workflow_runs: ["name", "session_id", "source"],
 };
