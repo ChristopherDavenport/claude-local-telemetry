@@ -8,6 +8,7 @@
  *   claude-local-telemetry mcp
  *   claude-local-telemetry stats
  *   claude-local-telemetry init
+ *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected

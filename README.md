@@ -84,8 +84,8 @@ node src/cli.ts api &
 npm run ui:dev
 ```
 
-Eight views — overview, cost, sessions, traces, tool audit, plugins, hook health,
-and a query builder — over the same ten HTTP routes. The builder is the
+Nine views — overview, cost, sessions, agents, traces, tool audit, plugins, hook
+health, and a query builder — over the same fourteen HTTP routes. The builder is the
 interesting one: pick a table, a calculation and a breakdown, then click a bar
 to drill into a session and its trace. The whole query lives in the URL, so a
 result is a link you can paste into an issue. It also has a raw `SELECT` box,
@@ -117,12 +117,50 @@ picked by eye. Theme follows the OS setting.
 Nothing on the page talks to anything but this API — no fonts, no CDN, no
 analytics. The store holds prompts and tool inputs.
 
+## Delegated work
+
+Subagents write their own transcripts, under
+`<project>/<session>/subagents/[workflows/<runId>/]agent-<id>.jsonl`. Backfill
+has always read them; since schema v2 it also reads the *path*, which is the
+only place the linkage exists.
+
+On the corpus this was built against that attributes **37% of all input-plus-cache
+tokens** which previously belonged to nobody in particular.
+
+Two things follow that are worth stating plainly:
+
+**An agent is not a session.** 366 of 375 agent transcripts carry their
+*parent's* session id, so their turns were already landing in the parent's
+totals — just unlabelled. `agent_id` therefore hangs off `api_requests` and
+`tool_calls`, and a session page shows what it delegated rather than pretending
+the agents were separate sessions.
+
+**Measured, not reported.** A synchronous agent returns its token totals to the
+caller; a backgrounded one acknowledges and never does. So the figures here are
+summed from each agent's own transcript, with the reported total shown beside
+them when it exists.
+
+## Un-blinding plugin cost
+
+```sh
+claude-local-telemetry alias derive
+```
+
+OTel knows a plugin's `plugin_id_hash` but calls it `third-party`; the
+transcript names it outright. Both key on `request_id`, so where the two sources
+describe the same request the mapping can be *read off* rather than guessed. A
+hash that maps to two names is reported as ambiguous rather than resolved by
+majority — settle those with `alias set <hash> <name>`, which outranks a derived
+mapping and survives re-derivation.
+
 ## Ask it things
 
-The MCP server exposes ten read-only tools — `telemetry_overview`,
+The MCP server exposes fourteen read-only tools — `telemetry_overview`,
 `telemetry_cost`, `telemetry_sessions`, `telemetry_tool_audit`,
-`telemetry_traces`, `telemetry_trace`, `telemetry_plugin_costs`,
-`telemetry_hook_health`, `telemetry_run_query`, and `telemetry_sql`.
+`telemetry_traces`, `telemetry_trace`, `telemetry_workflows`,
+`telemetry_workflow`, `telemetry_agents`, `telemetry_teams`,
+`telemetry_plugin_costs`, `telemetry_hook_health`, `telemetry_run_query`, and
+`telemetry_sql`.
 
 Start with `telemetry_overview`; it reports what is in the store and over what
 period, which determines whether a question is answerable at all.
