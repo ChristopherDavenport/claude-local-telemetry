@@ -68,7 +68,7 @@ public. Both are.
 ## What ships
 
 `files` limits the tarball to `dist/**/*.js`, `skills`, `.claude-plugin` and the
-three top-level docs — 13 files, 28 KB.
+three top-level docs — 14 files, 37 KB.
 
 No declarations, no source maps, no `src`. This is a CLI: `package.json`
 declares a `bin` and no `main`/`exports`, so nothing is importable and `.d.ts`
