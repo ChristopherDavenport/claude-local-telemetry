@@ -1,6 +1,6 @@
 {
   "name": "claude-local-telemetry",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local observability for Claude Code: OTLP sink, transcript backfill, and an MCP server over SQLite.",
   "license": "MIT",
   "type": "module",
