@@ -124,14 +124,14 @@ Subagents write their own transcripts, under
 has always read them; since schema v2 it also reads the *path*, which is the
 only place the linkage exists.
 
-On the corpus this was built against that attributes **37% of all input-plus-cache
-tokens** which previously belonged to nobody in particular.
+Where agents are used heavily that can be a large share of all token spend,
+previously belonging to nobody in particular.
 
 Two things follow that are worth stating plainly:
 
-**An agent is not a session.** 366 of 375 agent transcripts carry their
-*parent's* session id, so their turns were already landing in the parent's
-totals — just unlabelled. `agent_id` therefore hangs off `api_requests` and
+**An agent is not a session.** Agent transcripts carry their *parent's* session
+id, so their turns were already landing in the parent's totals — just
+unlabelled. `agent_id` therefore hangs off `api_requests` and
 `tool_calls`, and a session page shows what it delegated rather than pretending
 the agents were separate sessions.
 
@@ -207,9 +207,10 @@ non-zero from the first session this store ever recorded.
 
 ## Storage
 
-SQLite, deliberately. Measured on a real corpus: ~900 API requests/day, which is
-1.7M rows at five years. The heaviest group-by over 1.7M rows runs in 128ms with
-three covering indexes; the whole query surface over a month of data is 82ms.
+SQLite, deliberately. Sized against heavy daily use — on the order of a
+thousand API requests a day, so a few million rows after five years. The
+heaviest group-by over 1.7M rows runs in 128ms with three covering indexes; the
+whole query surface over a month of data is 82ms.
 
 ClickHouse is built for three orders of magnitude more than this and would
 reintroduce the daemon, port and config that `http/json` let us avoid. If
