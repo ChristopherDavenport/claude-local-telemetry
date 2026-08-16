@@ -35,15 +35,22 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # `cache:` is deliberately omitted rather than set empty — that is how
-      # setup-node disables caching. A stale or poisoned cache is a
+      # Caching is off, deliberately: a stale or poisoned cache is a
       # supply-chain problem in a release build in a way it is not for a test.
-      - uses: actions/setup-node@v4
+      #
+      # `package-manager-cache: false` is the load-bearing line, not omitting
+      # `cache:`. Omitting it was sufficient through setup-node v4, but v5
+      # added automatic caching and v6 narrowed it to npm — which is us. This
+      # repo has no `packageManager` field to trigger it today, but that is a
+      # property of package.json, not of intent, and adding one later should
+      # not quietly switch caching back on in the release path.
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - run: npm ci --no-audit --no-fund
 

@@ -23,8 +23,8 @@ jobs:
         # Linux, and invisible to anyone developing on a Mac.
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       # node:sqlite and TypeScript type-stripping are both built in, so the
@@ -43,8 +43,8 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       # `npm ci`, not `npm install`, so this also asserts the lockfile is honest.
