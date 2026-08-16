@@ -242,6 +242,31 @@ test("every query returns and stays a reasonable size", () => {
   });
 });
 
+/**
+ * The vocabularies are hand-maintained lists that have to track the schema, and
+ * schema v2 shipped with three new columns that `cost()` could not group by —
+ * so "what did each agent cost", the first question the new data invites, only
+ * worked through run_query. These execute every advertised option against a
+ * real store, so an option that names a column which does not exist fails here
+ * rather than in someone's tool call.
+ */
+test("every advertised group_by and table actually runs", () => {
+  q((d) => {
+    for (const g of Object.keys(Q.COST_GROUPS_FOR_TEST)) {
+      assert.doesNotThrow(() => Q.cost(d, { groupBy: g, limit: 1 }), `group_by ${g}`);
+    }
+    for (const t of TABLES) {
+      assert.doesNotThrow(() => Q.runQuery(d, { table: t, calculate: "count", limit: 1 }), `table ${t}`);
+    }
+  });
+});
+
+test("the v2 columns are reachable from the purpose-built tools", () => {
+  for (const g of ["agent_id", "workflow_run_id", "plugin_id_hash"]) {
+    assert.ok(g in Q.COST_GROUPS_FOR_TEST, `cost() cannot group by ${g}`);
+  }
+});
+
 test("the read-only guard refuses everything that is not a SELECT", () => {
   q((d) => {
     for (const bad of [

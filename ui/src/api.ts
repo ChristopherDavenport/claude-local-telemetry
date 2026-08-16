@@ -419,11 +419,13 @@ export const api = {
 export const COST_GROUPS = [
   "day", "hour", "model", "query_source", "plugin_resolved", "skill_name",
   "agent_name", "session_id", "cwd", "git_branch", "speed", "effort",
+  "agent_id", "workflow_run_id", "plugin_id_hash",
 ] as const;
 
 export const TABLES = [
   "api_requests", "tool_calls", "events", "spans", "metrics",
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
+  "agent_runs", "workflow_runs",
 ] as const;
 
 export const AGGS = [
@@ -437,8 +439,12 @@ export const BREAKDOWNS: Record<string, readonly string[]> = {
   api_requests: [
     "model", "query_source", "plugin_resolved", "skill_name", "agent_name",
     "speed", "effort", "cwd", "git_branch", "source", "mcp_server", "mcp_tool",
+    "agent_id", "workflow_run_id", "plugin_id_hash",
   ],
-  tool_calls: ["tool_name", "decision", "decision_source", "error_type", "success", "cwd", "source"],
+  tool_calls: [
+    "tool_name", "decision", "decision_source", "error_type", "success", "cwd", "source",
+    "agent_id", "workflow_run_id",
+  ],
   events: ["name", "source"],
   spans: ["name"],
   metrics: ["name"],
@@ -446,4 +452,6 @@ export const BREAKDOWNS: Record<string, readonly string[]> = {
   plugin_loads: ["plugin_name", "marketplace", "scope", "version"],
   plugin_alias: ["plugin_name", "marketplace", "confidence"],
   hook_runs: ["hook_name", "hook_event", "hook_source"],
+  agent_runs: ["agent_type", "team_name", "model", "status", "label", "workflow_run_id", "source"],
+  workflow_runs: ["name", "session_id", "source"],
 };

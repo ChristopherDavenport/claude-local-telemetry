@@ -38,7 +38,17 @@ const COST_GROUPS: Record<string, string> = {
   git_branch: "git_branch",
   speed: "speed",
   effort: "effort",
+  // Added with schema v2. "what did each agent cost" is the first question the
+  // agent data invites, and without these it could only be answered through
+  // run_query — which returns one aggregate, not the cost-and-token breakdown
+  // this returns per row.
+  agent_id: "agent_id",
+  workflow_run_id: "workflow_run_id",
+  plugin_id_hash: "plugin_id_hash",
 };
+
+/** Exported for the test that runs every advertised option against a store. */
+export const COST_GROUPS_FOR_TEST = COST_GROUPS;
 
 const SELECT_ONLY = /^\s*select\b/i;
 const FORBIDDEN =
