@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.2 — 2026-08-16
+
+The tag is now the version. Releasing is `git tag` and a push; `package.json`
+carries `0.0.0` in the repo and CI writes the real number from the tag before
+it builds. There is no bump commit, so there is nothing to forget and no way
+for the tag and the manifest to disagree.
+
+**Fixed: the MCP server reported the wrong version.** `serverInfo.version` was
+hardcoded, and said `0.1.0` for the whole of the `0.1.1` release. It now reads
+`.claude-plugin/plugin.json` at runtime — the one manifest correct in both
+channels, since the tag only reaches `package.json` inside CI and a marketplace
+clone runs straight from `src/`.
+
+`.claude-plugin/plugin.json` had drifted for the same reason, and is now
+enforced: the release workflow refuses to publish if it does not equal the tag.
+It stays hand-maintained because the marketplace clones this repo and never
+sees the tarball, so a version written at pack time would not reach plugin
+users.
+
+Also: a prerelease tag now publishes under `next` rather than capturing
+`latest`, the release workflow can be dispatched manually as a dry run, and the
+packed tarball's version is asserted against the tag before publishing.
+
 ## 0.1.1 — 2026-08-16
 
 First release published by CI, and therefore the first carrying a **provenance

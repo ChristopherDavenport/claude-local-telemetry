@@ -19,10 +19,34 @@
  */
 
 import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
 import { openForRead } from "./store.ts";
 import * as Q from "./queries.ts";
 
 const PROTOCOL = "2024-11-05";
+
+/**
+ * Reported to MCP clients on `initialize`. Read rather than hardcoded, because
+ * hardcoding it meant this said 0.1.0 for the whole of the 0.1.1 release.
+ *
+ * `plugin.json` rather than `package.json` is deliberate: it is the only
+ * manifest correct in both channels. The tag writes `package.json` at publish
+ * time, so a marketplace clone — which runs this straight from `src/` — would
+ * read the placeholder. `../` resolves the same either way, since `src/` and
+ * `dist/` both sit one level under the package root.
+ *
+ * A version is informational; failing to read it must not stop the server
+ * handshaking, hence the fallback rather than a throw.
+ */
+const VERSION = ((): string => {
+  try {
+    const raw = readFileSync(new URL("../.claude-plugin/plugin.json", import.meta.url), "utf8");
+    const v = (JSON.parse(raw) as { version?: string }).version;
+    return typeof v === "string" ? v : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 interface Tool {
   name: string;
@@ -191,7 +215,7 @@ export function dispatch(msg: Record<string, unknown>, dbPath?: string): Record<
       jsonrpc: "2.0", id, result: {
         protocolVersion: PROTOCOL,
         capabilities: { tools: {} },
-        serverInfo: { name: "claude-local-telemetry", version: "0.1.0" },
+        serverInfo: { name: "claude-local-telemetry", version: VERSION },
       },
     };
   }

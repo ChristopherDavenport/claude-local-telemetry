@@ -54,6 +54,57 @@ jobs:
 
       - run: npm ci --no-audit --no-fund
 
+      # The tag is the version. `package.json` carries 0.0.0 in the repo and CI
+      # writes the real number here, so cutting a release is `git tag` and
+      # nothing else — there is no bump commit, and therefore no way for the
+      # tag and the manifest to disagree.
+      #
+      # Runs before the build so everything downstream, the packed tarball
+      # included, sees the real version.
+      - name: Derive version from tag
+        id: v
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::notice::not a tag — running as a dry run, nothing will be published"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if ! printf '%s' "$VERSION" | grep -Eq "$SEMVER"; then
+            echo "::error::tag $GITHUB_REF_NAME is not a semver version"
+            exit 1
+          fi
+
+          # plugin.json is hand-maintained: the marketplace clones this repo and
+          # never sees the tarball, so a version written here at pack time would
+          # not reach plugin users. Asserting it rather than trusting it — it
+          # silently stayed at 0.1.0 across the 0.1.1 release.
+          #
+          # Compared against the release core, not the whole tag: v0.1.2-rc.1
+          # is a prerelease *of* 0.1.2, so plugin.json holds the version being
+          # worked toward and every rc for it passes. Demanding an exact match
+          # would mean committing 0.1.2-rc.1 and then 0.1.2, which is precisely
+          # the bump-commit churn the tag is meant to remove.
+          CORE="${VERSION%%[-+]*}"
+          PLUGIN=$(node -p "require('./.claude-plugin/plugin.json').version")
+          if [ "$PLUGIN" != "$CORE" ]; then
+            echo "::error::.claude-plugin/plugin.json says $PLUGIN, tag $GITHUB_REF_NAME needs $CORE — bump it and re-tag"
+            exit 1
+          fi
+
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+          # A prerelease tag must not capture `latest`; npm hands `latest` to
+          # whatever was published most recently unless told otherwise.
+          case "$VERSION" in
+            *-*) echo "dist_tag=next"   >> "$GITHUB_OUTPUT" ;;
+            *)   echo "dist_tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "publishing $VERSION"
+
       # Publishing something that does not pass its own tests is worse than not
       # publishing. prepack builds, but build explicitly so a failure here is
       # legible rather than buried in pack output.
@@ -65,19 +116,6 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
-
-      # The tag is the source of truth for the version; a mismatch means someone
-      # tagged without bumping, and npm would publish a version nobody expects.
-      - name: Tag matches package version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG=$(node -p "require('./package.json').version")
-          if [ "$TAG" != "$PKG" ]; then
-            echo "::error::tag v$TAG does not match package.json version $PKG"
-            exit 1
-          fi
-          echo "publishing $PKG"
 
       # Proves the built bin actually runs from an installed tarball. Node
       # refuses to strip types under node_modules, so a package that shipped
@@ -93,5 +131,17 @@ jobs:
           ./node_modules/.bin/claude-local-telemetry stats --db /tmp/smoke.db >/dev/null
           echo "bin runs from an installed tarball"
 
+          # The version is written by CI now rather than committed, so confirm
+          # it survived into the artifact instead of assuming it did.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            GOT=$(node -p "require('/tmp/smoke/node_modules/claude-local-telemetry/package.json').version")
+            if [ "$GOT" != "${GITHUB_REF_NAME#v}" ]; then
+              echo "::error::packed version is $GOT, tag says ${GITHUB_REF_NAME#v}"
+              exit 1
+            fi
+            echo "packed version is $GOT"
+          fi
+
       - name: Publish
-        run: npm publish
+        if: steps.v.outputs.publish == 'true'
+        run: npm publish --tag "${{ steps.v.outputs.dist_tag }}"

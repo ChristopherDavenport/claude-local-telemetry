@@ -244,10 +244,16 @@ CI runs Linux and macOS both. The first bug it ever caught was a BSD-only
 ## Releasing
 
 Published to npm on a `v*` tag via GitHub OIDC trusted publishing — no
-`NPM_TOKEN`, with provenance attestation generated automatically. See
-[RELEASING.md](RELEASING.md), including the one-time bootstrap: the trusted
-publisher can only be configured for a package that already exists, so `0.1.0`
-has to go out manually first.
+`NPM_TOKEN`, with provenance attestation generated automatically.
+
+The tag is the version. `package.json` carries `0.0.0` and CI writes the real
+number from the tag, so releasing is `git tag v0.1.2 && git push origin v0.1.2`
+and nothing else — no bump commit to forget, and no way for the tag and the
+manifest to disagree. `.claude-plugin/plugin.json` is the exception: the
+marketplace clones this repo rather than installing the tarball, so its version
+is committed, and the workflow refuses to publish if it does not match the tag.
+
+See [RELEASING.md](RELEASING.md).
 
 ## Licence
 
