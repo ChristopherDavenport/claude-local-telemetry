@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 — 2026-08-16
 
 Setup documentation rewritten against a first real install, which surfaced a
 gap that made the documented happy path produce a degraded store.
