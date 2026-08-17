@@ -70,6 +70,19 @@ const V2_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
   tool_calls: [["agent_id", "TEXT"], ["workflow_run_id", "TEXT"]],
 };
 
+/**
+ * v3: a derived dollar figure, kept apart from the measured one.
+ *
+ * cost_usd is what the provider reported and exists on 0.4% of rows -- only
+ * those the OTLP sink saw. Everything backfilled from a transcript has exact
+ * token counts and no price. Writing an estimate into cost_usd would make the
+ * two indistinguishable and quietly turn a measurement into a guess, so the
+ * estimate gets its own column and every reader chooses which it wants.
+ */
+const V3_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
+  api_requests: [["cost_est_usd", "REAL"]],
+};
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -428,10 +441,15 @@ function columnsOf(db: DatabaseSync, table: string): Set<string> {
  * is nullable with no default, so existing rows stay valid under STRICT.
  */
 function migrate(db: DatabaseSync): void {
-  for (const [table, cols] of Object.entries(V2_COLUMNS)) {
-    const have = columnsOf(db, table);
-    for (const [name, decl] of cols) {
-      if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+  // Each version's map is applied in turn rather than merged: two versions can
+  // add columns to the same table, and a spread would silently drop the older
+  // entry when both name it.
+  for (const version of [V2_COLUMNS, V3_COLUMNS]) {
+    for (const [table, cols] of Object.entries(version)) {
+      const have = columnsOf(db, table);
+      for (const [name, decl] of cols) {
+        if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+      }
     }
   }
 }

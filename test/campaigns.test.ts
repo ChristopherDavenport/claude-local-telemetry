@@ -21,6 +21,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { init } from "../src/store.ts";
 import { derive, resolveProject } from "../src/campaigns.ts";
 import { repoOf } from "../src/artifacts.ts";
+import { price, rateFor } from "../src/pricing.ts";
 
 let work: string;
 let db: DatabaseSync;
@@ -243,5 +244,57 @@ test("an outcome is derived from artifacts, and absence is its own answer", () =
     GROUP BY c.campaign_id ORDER BY c.started_at`).all() as Array<{ o: string }>;
   assert.equal(rows[0]!.o, "abandoned");
   assert.equal(rows[1]!.o, "no artifact");
+  db.close();
+});
+
+test("a model id resolves to its family by longest prefix", () => {
+  // Real ids in the store carry suffixes: a 1M-context marker, a dated
+  // snapshot. Matching on the exact string would leave both unpriced.
+  assert.equal(rateFor("claude-opus-5")?.input, 5);
+  assert.equal(rateFor("claude-opus-5[1m]")?.input, 5);
+  assert.equal(rateFor("claude-haiku-4-5-20251001")?.input, 1);
+  assert.equal(rateFor("claude-sonnet-5")?.output, 15);
+  assert.equal(rateFor("claude-fable-5")?.output, 50);
+  assert.equal(rateFor("some-other-model"), null, "an unknown model must not be guessed at");
+  assert.equal(rateFor(null), null);
+});
+
+test("cache tokens are priced at their own rates, not as fresh input", () => {
+  // Cache reads dominate this workload by an order of magnitude (8.2B vs 0.5B
+  // fresh input), so charging them at the input rate would overstate spend
+  // enormously and dropping them would understate it.
+  const r = rateFor("claude-opus-5")!;
+  assert.equal(r.cacheRead, 0.5, "reads are a tenth of input");
+  assert.equal(r.cacheWrite, 6.25, "writes are 1.25x input");
+});
+
+test("pricing fills cost_est_usd and never touches measured cost_usd", () => {
+  db = seed([{ id: "s1", start: H(0), end: H(1), cwds: ["/proj/a"] }]);
+  db.prepare(
+    "INSERT INTO api_requests(request_id,ts,session_id,model,input_tokens,output_tokens," +
+    "cache_read,cache_creation,cost_usd,source) VALUES(?,?,?,?,?,?,?,?,?,'test')",
+  ).run("r-measured", H(0), "s1", "claude-opus-5", 1_000_000, 1_000_000, 0, 0, 99.0);
+  db.prepare(
+    "INSERT INTO api_requests(request_id,ts,session_id,model,input_tokens,output_tokens," +
+    "cache_read,cache_creation,source) VALUES(?,?,?,?,?,?,?,?,'test')",
+  ).run("r-transcript", H(0), "s1", "claude-opus-5", 1_000_000, 1_000_000, 1_000_000, 1_000_000);
+
+  const r = price(db);
+  assert.equal(r.priced, 2, "both rows carrying a model get an estimate");
+  // seed() writes a row with no model at all. Leaving it unpriced rather than
+  // assuming a default is the point: a fabricated rate is worse than a gap.
+  assert.equal(r.unpriceable, 1);
+  assert.deepEqual(r.unknownModels, [], "a null model is not an unknown model");
+
+  const measured = db.prepare(
+    "SELECT cost_usd, cost_est_usd FROM api_requests WHERE request_id='r-measured'").get() as
+    { cost_usd: number; cost_est_usd: number };
+  assert.equal(measured.cost_usd, 99.0, "the provider's figure must survive untouched");
+  assert.equal(measured.cost_est_usd, 30, "1M in at $5 + 1M out at $25");
+
+  const est = db.prepare(
+    "SELECT cost_est_usd FROM api_requests WHERE request_id='r-transcript'").get() as
+    { cost_est_usd: number };
+  assert.equal(est.cost_est_usd, 5 + 25 + 0.5 + 6.25, "input + output + cache read + cache write");
   db.close();
 });

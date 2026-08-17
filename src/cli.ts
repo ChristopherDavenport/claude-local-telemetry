@@ -12,6 +12,7 @@
  *   claude-local-telemetry campaigns [derive [--window-hours N] [--quiet-hours N]
  *                                             [--min-weight W] [--refresh-projects]
  *                                    | harvest [--grace-days N] [--since ISO]
+ *                                    | price
  *                                    | list]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
@@ -28,6 +29,7 @@ import { serve as serveMcp } from "./mcp.ts";
 import * as Alias from "./alias.ts";
 import * as Campaigns from "./campaigns.ts";
 import * as Artifacts from "./artifacts.ts";
+import * as Pricing from "./pricing.ts";
 
 function parse(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -193,6 +195,21 @@ function main(): number {
             `  ephemeral cwds ${String(r.ephemeralSkipped).padStart(6)}  (not linked)\n` +
             `  unattributed   ${String(r.unattributed).padStart(6)}  (no project touched)\n`,
           );
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "price") {
+        const conn = init(db);
+        try {
+          const r = Pricing.price(conn);
+          process.stdout.write(
+            `  priced         ${String(r.priced).padStart(6)}  rows given cost_est_usd\n` +
+            `  measured       ${String(r.alreadyMeasured).padStart(6)}  rows that already had cost_usd\n` +
+            `  unpriceable    ${String(r.unpriceable).padStart(6)}  no rate for the model\n` +
+            `  estimated      $${r.estimatedUsd.toFixed(2)}\n` +
+            `  measured       $${r.measuredUsd.toFixed(2)}  (provider-reported, for comparison)\n` +
+            `  rates taken    ${Pricing.RATES_TAKEN}, first-party list\n`);
+          for (const m of r.unknownModels) process.stdout.write(`  no rate: ${m}\n`);
         } finally { conn.close(); }
         return 0;
       }
