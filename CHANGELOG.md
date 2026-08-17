@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.1 — 2026-08-17
+
+Two defects in 0.2.0, both found by running the acceptance tests against a real
+store rather than a fixture. Neither corrupts data; both quietly report the
+wrong thing, which on a ledger is the worse failure.
+
+- **`init` no longer moves `schema_version` backwards.** It upserted its own
+  version unconditionally, so an older build sharing the store — a launchd sink
+  a release or two behind, which is the normal state of affairs — restamped a
+  newer marker down to its own. Nothing is lost when that happens, because an
+  old build never touches tables it does not know about, but `openForRead` then
+  refuses a store whose data is entirely intact and every `campaigns` command
+  reports it as too old. The marker now records the highest schema ever applied.
+- **`campaigns harvest` counts pull requests, not attribution rows.** Artifact
+  attribution is a window-based join, so several campaigns can legitimately
+  claim one pull request — three did, on the store this was measured against.
+  The summary reported those rows as though each were a distinct artifact: 65
+  merged rows for 38 merged pull requests, which understates cost per shipped
+  change by 1.7x. Both numbers are now reported, the distinct count leads, and
+  the gap between them is stated rather than left to be inferred. `HarvestResult`
+  gains `distinctArtifacts`, `distinctMerged`, `distinctClosed` and
+  `distinctOpen`; the existing fields keep their row semantics.
+
+No schema change — a 0.2.0 store needs no migration.
+
 ## 0.2.0 — 2026-08-17
 
 The store could say what work cost and not whether any of it was kept. This
