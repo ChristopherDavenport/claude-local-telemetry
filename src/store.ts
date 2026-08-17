@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function defaultDbPath(): string {
   return process.env["CLAUDE_TELEMETRY_DB"]
@@ -47,6 +47,7 @@ export const TABLES = [
   "api_requests", "tool_calls", "events", "spans", "metrics",
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
   "agent_runs", "workflow_runs",
+  "projects", "campaigns", "campaign_sessions", "campaign_projects",
 ] as const;
 
 /**
@@ -290,6 +291,61 @@ CREATE TABLE IF NOT EXISTS plugin_alias (
     marketplace    TEXT,
     confidence     TEXT NOT NULL,
     noted_at       TEXT
+) STRICT;
+
+-- A cwd resolved to the thing it is part of, so that /repo and /repo/sub, and
+-- two clones of one repository under different parents, count as one project.
+-- Populated by \`campaigns derive\`; cached because resolving it shells out to
+-- git once per distinct directory and most of them never change.
+--
+-- kind records how the key was obtained, because the three are not equally
+-- trustworthy and a later reader should be able to tell them apart:
+--   remote    the git remote URL, normalised. Merges separate clones.
+--   toplevel  the work-tree root. Merges subdirectories, not clones.
+--   path      the cwd verbatim. The directory is gone or was never a repo.
+--   ephemeral scratch (/tmp, /var/folders). Deliberately NOT a project: these
+--             are shared by unrelated work and would link it all together.
+CREATE TABLE IF NOT EXISTS projects (
+    cwd         TEXT PRIMARY KEY,
+    project_key TEXT,
+    kind        TEXT NOT NULL,
+    resolved_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_proj_key ON projects(project_key);
+
+-- A campaign is the unit of work this operator actually has: a set of sessions
+-- spanning several repositories over several days that share one purpose. It
+-- is derived, never entered. Nothing here is written by hand -- the inputs are
+-- session timing and the projects each session touched, both of which are
+-- recorded as a side effect of working.
+--
+-- The ticket-shaped alternative was rejected on evidence: over 27 days, 80% of
+-- sessions ran on HEAD or main and not one branch name was ticket-shaped. A
+-- ledger keyed on something that is not there measures nothing.
+CREATE TABLE IF NOT EXISTS campaigns (
+    campaign_id   TEXT PRIMARY KEY,
+    label         TEXT,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT NOT NULL,
+    session_count INTEGER NOT NULL,
+    project_count INTEGER NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_usd      REAL,
+    derived_at    TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_camp_started ON campaigns(started_at);
+
+CREATE TABLE IF NOT EXISTS campaign_sessions (
+    campaign_id TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, session_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS campaign_projects (
+    campaign_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, project_key)
 ) STRICT;
 `;
 

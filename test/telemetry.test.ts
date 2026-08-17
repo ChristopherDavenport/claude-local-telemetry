@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { init, openForRead, stats, TABLES } from "../src/store.ts";
+import { init, openForRead, stats, TABLES, SCHEMA_VERSION } from "../src/store.ts";
 import { backfill, pathContext } from "../src/backfill.ts";
 import { handleLogs, handleTraces } from "../src/sink.ts";
 import * as Q from "../src/queries.ts";
@@ -432,7 +432,7 @@ test("aliases are derived from requests both sources described", () => {
   d.close();
 });
 
-test("a v1 store gains the v2 columns without losing rows", () => {
+test("an older store gains the newer columns without losing rows", () => {
   const path = join(work, "v1.db");
   const d = init(path);
   d.exec("INSERT INTO api_requests (request_id, ts, source) VALUES ('keep', '2026-01-01T00:00:00Z', 'otel')");
@@ -440,7 +440,13 @@ test("a v1 store gains the v2 columns without losing rows", () => {
   d.prepare("UPDATE meta SET value='1' WHERE key='schema_version'").run();
   d.close();
 
-  assert.throws(() => openForRead(path), /schema v1.*needs v2/s);
+  // Not a hard-coded version: this assertion is about the shape of the
+  // refusal, and pinning the number means every schema bump breaks a test that
+  // has nothing to do with the change.
+  assert.throws(
+    () => openForRead(path),
+    new RegExp(`schema v1.*needs v${SCHEMA_VERSION}`, "s"),
+  );
   init(path).close();
   const re = openForRead(path);
   const r = re.prepare("SELECT count(*) c FROM api_requests WHERE request_id='keep'")

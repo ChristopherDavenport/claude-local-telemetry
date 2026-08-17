@@ -9,6 +9,7 @@
  *   claude-local-telemetry stats
  *   claude-local-telemetry init
  *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
+ *   claude-local-telemetry campaigns [derive [--window-hours N] [--refresh-projects] | list]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected
@@ -22,6 +23,7 @@ import { startSink } from "./sink.ts";
 import { startApi } from "./api.ts";
 import { serve as serveMcp } from "./mcp.ts";
 import * as Alias from "./alias.ts";
+import * as Campaigns from "./campaigns.ts";
 
 function parse(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -164,6 +166,54 @@ function main(): number {
         process.stdout.write(`unknown: alias ${sub}\n`);
         return 1;
       } finally { conn.close(); }
+    }
+    case "campaigns": {
+      const sub = rest[1] ?? "list";
+      if (sub === "derive") {
+        // Writes, so it takes a read-write handle and runs the schema first --
+        // an older store has no campaigns table and init() is idempotent.
+        const conn = init(db);
+        try {
+          const opts: Campaigns.DeriveOptions = {
+            refreshProjects: flags["refresh-projects"] === true,
+          };
+          if (flags["window-hours"]) opts.windowHours = Number(flags["window-hours"]);
+          const r = Campaigns.derive(conn, opts);
+          process.stdout.write(
+            `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
+            `  sessions       ${String(r.sessions).padStart(6)}\n` +
+            `  projects new   ${String(r.projectsResolved).padStart(6)}\n` +
+            `  ephemeral cwds ${String(r.ephemeralSkipped).padStart(6)}  (not linked)\n` +
+            `  unattributed   ${String(r.unattributed).padStart(6)}  (no project touched)\n`,
+          );
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "list") {
+        const conn = openForRead(db);
+        try {
+          const rows = conn.prepare(
+            "SELECT campaign_id, label, started_at, ended_at, session_count, " +
+            "project_count, input_tokens, output_tokens, cost_usd FROM campaigns " +
+            "ORDER BY started_at DESC",
+          ).all() as Array<Record<string, unknown>>;
+          for (const r of rows) {
+            const days = Math.max(1, Math.round(
+              (Date.parse(String(r["ended_at"])) - Date.parse(String(r["started_at"]))) / 86400000));
+            process.stdout.write(
+              `  ${String(r["started_at"]).slice(0, 10)}  ${String(days).padStart(2)}d  ` +
+              `${String(r["session_count"]).padStart(3)}s  ` +
+              `${String(r["project_count"]).padStart(2)}p  ` +
+              `${(Number(r["output_tokens"]) / 1000).toFixed(0).padStart(6)}k out  ` +
+              `${r["label"] ?? String(r["campaign_id"]).slice(0, 8)}\n`,
+            );
+          }
+          process.stdout.write(`\n  ${rows.length} campaigns\n`);
+        } finally { conn.close(); }
+        return 0;
+      }
+      process.stdout.write(`unknown: campaigns ${sub}\n`);
+      return 1;
     }
     case "mcp": {
       serveMcp(db);
