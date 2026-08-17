@@ -81,6 +81,11 @@ const V2_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
  */
 const V3_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
   api_requests: [["cost_est_usd", "REAL"]],
+  // The session's opening ask, in the operator's own words. Only 2 of 114
+  // campaigns had any prompt text from OTel -- that path is hours old and the
+  // transcripts are the whole retention window -- so a campaign could be priced
+  // and dated and still be unnameable. This is what makes it nameable.
+  sessions: [["first_prompt", "TEXT"]],
 };
 
 const SCHEMA = `

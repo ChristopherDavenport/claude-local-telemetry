@@ -22,6 +22,8 @@ import { init } from "../src/store.ts";
 import { derive, resolveProject } from "../src/campaigns.ts";
 import { repoOf } from "../src/artifacts.ts";
 import { price, rateFor } from "../src/pricing.ts";
+import * as Communities from "../src/communities.ts";
+import { parseLabels, candidates } from "../src/labeling.ts";
 
 let work: string;
 let db: DatabaseSync;
@@ -296,5 +298,89 @@ test("pricing fills cost_est_usd and never touches measured cost_usd", () => {
     "SELECT cost_est_usd FROM api_requests WHERE request_id='r-transcript'").get() as
     { cost_est_usd: number };
   assert.equal(est.cost_est_usd, 5 + 25 + 0.5 + 6.25, "input + output + cache read + cache write");
+  db.close();
+});
+
+test("community detection splits two cliques joined by one weak edge", () => {
+  // The case the strategy exists for. It also contextualises the low Q measured
+  // on real data: the algorithm works, that graph just has no structure.
+  const nodes = ["a1", "a2", "a3", "b1", "b2", "b3"];
+  const edges: Communities.Edge[] = [];
+  for (const [x, y] of [["a1", "a2"], ["a1", "a3"], ["a2", "a3"],
+                        ["b1", "b2"], ["b1", "b3"], ["b2", "b3"]]) {
+    edges.push({ a: x!, b: y!, weight: 1 });
+  }
+  edges.push({ a: "a1", b: "b1", weight: 0.05 });   // the bridge
+
+  const r = Communities.detect(nodes, edges);
+  assert.equal(new Set(r.communityOf.values()).size, 2, "two cliques, two communities");
+  assert.equal(r.communityOf.get("a1"), r.communityOf.get("a3"));
+  assert.notEqual(r.communityOf.get("a1"), r.communityOf.get("b1"));
+  assert.ok(r.modularity > 0.3, `Q should show real structure, got ${r.modularity}`);
+});
+
+test("a uniform clique has no structure to find, and Q says so", () => {
+  // Measured on the source store: the largest cluster is 97% dense with every
+  // weight between 0.92 and 1.00. No partition of it beats chance, and the
+  // honest output is a low Q rather than an arbitrary split.
+  const nodes = ["n1", "n2", "n3", "n4"];
+  const edges: Communities.Edge[] = [];
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      edges.push({ a: nodes[i]!, b: nodes[j]!, weight: 1 });
+    }
+  }
+  const r = Communities.detect(nodes, edges);
+  assert.equal(new Set(r.communityOf.values()).size, 1, "a clique is one community");
+  assert.ok(r.modularity < 0.1, `Q should be near zero, got ${r.modularity}`);
+});
+
+test("community detection is deterministic across runs", () => {
+  // The published algorithm randomises visit order and tie-breaking. Left
+  // random, a campaign id would change because the reconciler was re-run.
+  const nodes = ["x", "y", "z", "w"];
+  const edges: Communities.Edge[] = [
+    { a: "x", b: "y", weight: 1 }, { a: "z", b: "w", weight: 1 },
+    { a: "y", b: "z", weight: 0.1 },
+  ];
+  const a = Communities.detect(nodes, edges);
+  const b = Communities.detect(nodes, edges);
+  assert.deepEqual([...a.communityOf].sort(), [...b.communityOf].sort());
+});
+
+test("an isolated node is its own campaign, not the nearest one", () => {
+  const r = Communities.detect(["lonely", "p", "q"], [{ a: "p", b: "q", weight: 1 }]);
+  assert.equal(r.communityOf.get("lonely"), "lonely");
+});
+
+test("label parsing survives a fence or a sentence of preamble", () => {
+  const withFence = 'Here you go:\n```json\n[{"id":"c1","label":"Ship the thing"}]\n```';
+  assert.deepEqual(parseLabels(withFence), [{ id: "c1", label: "Ship the thing" }]);
+  assert.deepEqual(parseLabels('[{"id":"c1","label":"A"},{"id":"c2","label":"B"}]').length, 2);
+  assert.deepEqual(parseLabels("no json here"), []);
+  assert.deepEqual(parseLabels('[{"id":"c1"}]'), [], "an entry with no label is dropped");
+  assert.deepEqual(parseLabels('[{"id":"c1","label":"   "}]'), [], "blank labels are dropped");
+});
+
+test("a campaign with no prompt on any session is reported, not invented", () => {
+  db = seed([{ id: "s1", start: H(0), end: H(1), cwds: ["/proj/a"] }]);
+  derive(db, { quietHours: 8 });
+  const before = candidates(db, false);
+  assert.equal(before.length, 1);
+  assert.deepEqual(before[0]!.prompts, [], "no material to name it from");
+
+  db.prepare("UPDATE sessions SET first_prompt=? WHERE session_id='s1'")
+    .run("Add a retry to the widget publisher");
+  const after = candidates(db, false);
+  assert.deepEqual(after[0]!.prompts, ["Add a retry to the widget publisher"]);
+  db.close();
+});
+
+test("already-labelled campaigns are skipped unless relabel is asked for", () => {
+  db = seed([{ id: "s1", start: H(0), end: H(1), cwds: ["/proj/a"] }]);
+  derive(db, { quietHours: 8 });
+  db.prepare("UPDATE campaigns SET label='already named'").run();
+  assert.equal(candidates(db, false).length, 0);
+  assert.equal(candidates(db, true).length, 1);
   db.close();
 });
