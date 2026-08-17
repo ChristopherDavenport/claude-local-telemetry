@@ -12,7 +12,7 @@
  *   claude-local-telemetry campaigns [derive [--window-hours N] [--quiet-hours N]
  *                                             [--min-weight W] [--strategy communities]
  *                                             [--refresh-projects]
- *                                    | harvest [--grace-days N] [--since ISO]
+ *                                    | harvest [--grace-days N] [--since ISO] [--author LOGIN]
  *                                    | price
  *                                    | label [--relabel] [--batch-size N] [--max-batches N] [--model M]
  *                                    | list]
@@ -243,6 +243,7 @@ function main(): number {
           const o: Artifacts.HarvestOptions = {};
           if (flags["grace-days"]) o.graceDays = Number(flags["grace-days"]);
           if (typeof flags["since"] === "string") o.since = flags["since"];
+          if (typeof flags["author"] === "string") o.author = flags["author"];
           const r = Artifacts.harvest(conn, o);
           process.stdout.write(
             `  campaigns      ${String(r.campaigns).padStart(6)}\n` +

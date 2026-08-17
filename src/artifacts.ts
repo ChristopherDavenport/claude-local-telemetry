@@ -32,6 +32,18 @@ import type { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 
 export interface HarvestOptions {
+  /**
+   * Whose pull requests count. Defaults to the authenticated user.
+   *
+   * Not optional in practice. Without it a campaign that touched a shared
+   * repository for an afternoon absorbs every pull request opened in that
+   * repository during its window: measured on a real store, one campaign
+   * picked up 155 artifacts from a busy org repo, nearly all of them written
+   * by other engineers. That does not merely add noise -- it inflates
+   * "shipped" with work the campaign had nothing to do with, which is the one
+   * number the ledger exists to get right.
+   */
+  author?: string;
   /** Days after the last session in which a pull request still counts. */
   graceDays?: number;
   /** Only harvest campaigns that ended on or after this ISO date. */
@@ -74,9 +86,9 @@ export function repoOf(projectKey: string): string | null {
   return m ? m[1]! : null;
 }
 
-function listPulls(repo: string, from: string, to: string): PullRequest[] {
+function listPulls(repo: string, from: string, to: string, author: string): PullRequest[] {
   const out = execFileSync("gh", [
-    "pr", "list", "--repo", repo, "--state", "all", "--limit", "200",
+    "pr", "list", "--repo", repo, "--author", author, "--state", "all", "--limit", "200",
     "--search", `created:${from.slice(0, 10)}..${to.slice(0, 10)}`,
     "--json", "number,state,title,url,createdAt,mergedAt,closedAt,additions,deletions",
   ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
@@ -85,6 +97,7 @@ function listPulls(repo: string, from: string, to: string): PullRequest[] {
 
 export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestResult {
   const now = opts.now ?? new Date().toISOString();
+  const author = opts.author ?? "@me";
   const graceMs = (opts.graceDays ?? 7) * 86400_000;
   const skipped: string[] = [];
 
@@ -127,10 +140,10 @@ export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestRes
       const repo = repoOf(project_key);
       if (!repo) continue;                     // a local path is not harvestable
       repos.add(repo);
-      const ck = `${repo} ${from.slice(0, 10)} ${to.slice(0, 10)}`;
+      const ck = `${repo} ${author} ${from.slice(0, 10)} ${to.slice(0, 10)}`;
       let pulls = cache.get(ck);
       if (!pulls) {
-        try { pulls = listPulls(repo, from, to); }
+        try { pulls = listPulls(repo, from, to, author); }
         catch (e) {
           const msg = `${repo}: ${(e as Error).message.split("\n")[0]}`;
           if (!skipped.includes(msg)) skipped.push(msg);
