@@ -18,9 +18,9 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
-import { init } from "../src/store.ts";
+import { init, SCHEMA_VERSION } from "../src/store.ts";
 import { derive, resolveProject } from "../src/campaigns.ts";
-import { repoOf } from "../src/artifacts.ts";
+import { repoOf, harvest } from "../src/artifacts.ts";
 import { price, rateFor } from "../src/pricing.ts";
 import * as Communities from "../src/communities.ts";
 import { parseLabels, candidates } from "../src/labeling.ts";
@@ -382,5 +382,63 @@ test("already-labelled campaigns are skipped unless relabel is asked for", () =>
   db.prepare("UPDATE campaigns SET label='already named'").run();
   assert.equal(candidates(db, false).length, 0);
   assert.equal(candidates(db, true).length, 1);
+  db.close();
+});
+
+test("one pull request claimed by two campaigns is two rows but one pull request", () => {
+  // Two campaigns a fortnight apart, both touching the same repository. A PR
+  // opened after the later campaign started falls inside both grace windows --
+  // the real store had a single PR claimed by three campaigns this way.
+  const path = join(work, `${Math.random().toString(36).slice(2)}.db`);
+  db = init(path);
+  const repo = "github.com/acme/widget";
+  for (const [id, day] of [["c1", 1], ["c2", 14]] as Array<[string, number]>) {
+    const t = new Date(Date.UTC(2026, 0, day)).toISOString();
+    db.prepare(
+      "INSERT INTO campaigns(campaign_id,strategy,started_at,ended_at,session_count," +
+      "project_count,input_tokens,output_tokens,derived_at) " +
+      "VALUES(?,'components',?,?,1,1,0,0,?)").run(id, t, t, t);
+    db.prepare("INSERT INTO campaign_projects(campaign_id,project_key) VALUES(?,?)")
+      .run(id, repo);
+  }
+
+  const pr = (n: number, state: string, mergedAt: string | null) => ({
+    number: n, state, title: `pr ${n}`, url: `u${n}`,
+    createdAt: new Date(Date.UTC(2026, 0, 20)).toISOString(),
+    mergedAt, closedAt: null, additions: 1, deletions: 0,
+  });
+  const r = harvest(db, {
+    graceDays: 30, author: "someone",
+    lister: () => [pr(1, "MERGED", "2026-01-21T00:00:00.000Z"), pr(2, "OPEN", null)],
+  });
+
+  assert.equal(r.artifacts, 4, "two PRs x two claiming campaigns");
+  assert.equal(r.merged, 2, "the merged PR is attributed twice");
+  assert.equal(r.distinctArtifacts, 2, "but there are only two pull requests");
+  assert.equal(r.distinctMerged, 1, "and only one of them shipped");
+  assert.equal(r.distinctOpen, 1);
+  assert.equal(r.distinctClosed, 0);
+  db.close();
+});
+
+test("init never moves schema_version backwards", () => {
+  // A v0.1.2 sink and a v3 CLI legitimately share one store. The older build
+  // opening it is harmless; the older build *restamping* it is not, because
+  // openForRead then refuses a file whose tables are all present.
+  const path = join(work, `${Math.random().toString(36).slice(2)}.db`);
+  db = init(path);
+  const read = () => (db.prepare(
+    "SELECT value FROM meta WHERE key='schema_version'").get() as { value: string }).value;
+  assert.equal(read(), String(SCHEMA_VERSION));
+
+  db.prepare("UPDATE meta SET value='99' WHERE key='schema_version'").run();
+  db.close();
+  db = init(path);
+  assert.equal(read(), "99", "a newer marker survives an older build calling init");
+
+  db.prepare("UPDATE meta SET value='1' WHERE key='schema_version'").run();
+  db.close();
+  db = init(path);
+  assert.equal(read(), String(SCHEMA_VERSION), "an older marker is still upgraded");
   db.close();
 });

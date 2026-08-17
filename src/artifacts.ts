@@ -49,19 +49,47 @@ export interface HarvestOptions {
   /** Only harvest campaigns that ended on or after this ISO date. */
   since?: string;
   now?: string;
+  /**
+   * Override how pull requests are fetched. Exists so the counting rules can be
+   * tested without `gh`, a network, or a fixture repository -- the row-versus-
+   * pull-request distinction below is precisely the kind of arithmetic that
+   * regresses without anyone noticing.
+   */
+  lister?: (repo: string, from: string, to: string, author: string) => PullRequest[];
 }
 
+/**
+ * Counts come in two flavours, and conflating them overstates output.
+ *
+ * `artifacts` and its merged/closed/open breakdown count **attribution rows** --
+ * one per (campaign, pull request). A pull request created in a repository that
+ * two campaigns both touched, inside both their windows, is genuinely claimed by
+ * both, so it contributes two rows. That is the intended behaviour of a
+ * window-based join and not something to dedupe away at write time.
+ *
+ * `distinct*` counts **pull requests**. This is the number to divide spend by.
+ * Measured on a real store the gap is not marginal -- 65 merged rows against 38
+ * merged pull requests, with three campaigns claiming a single PR -- so
+ * reporting rows as though they were output inflates the denominator by 1.7x
+ * and makes cost per shipped change look correspondingly cheap.
+ */
 export interface HarvestResult {
   campaigns: number;
   repos: number;
+  /** Attribution rows: one per (campaign, pull request). */
   artifacts: number;
   merged: number;
   closed: number;
   open: number;
+  /** Distinct pull requests, regardless of how many campaigns claim each. */
+  distinctArtifacts: number;
+  distinctMerged: number;
+  distinctClosed: number;
+  distinctOpen: number;
   skipped: string[];
 }
 
-interface PullRequest {
+export interface PullRequest {
   number: number;
   state: string;
   title: string;
@@ -101,7 +129,9 @@ export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestRes
   const graceMs = (opts.graceDays ?? 7) * 86400_000;
   const skipped: string[] = [];
 
-  if (!ghAvailable()) {
+  const fetchPulls = opts.lister ?? listPulls;
+
+  if (!opts.lister && !ghAvailable()) {
     // Loud, not silent. Recording nothing here is indistinguishable from a
     // campaign that genuinely produced nothing, and that is the more damaging
     // of the two readings.
@@ -129,6 +159,9 @@ export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestRes
   const cache = new Map<string, PullRequest[]>();
   let artifacts = 0, merged = 0, closed = 0, openCount = 0;
   const repos = new Set<string>();
+  // repo#number -> state. A pull request has exactly one state however many
+  // campaigns claim it, so a map keyed on its identity gives the distinct counts.
+  const distinct = new Map<string, string>();
 
   for (const c of campaigns) {
     const keys = db.prepare("SELECT project_key FROM campaign_projects WHERE campaign_id=?")
@@ -143,7 +176,7 @@ export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestRes
       const ck = `${repo} ${author} ${from.slice(0, 10)} ${to.slice(0, 10)}`;
       let pulls = cache.get(ck);
       if (!pulls) {
-        try { pulls = listPulls(repo, from, to, author); }
+        try { pulls = fetchPulls(repo, from, to, author); }
         catch (e) {
           const msg = `${repo}: ${(e as Error).message.split("\n")[0]}`;
           if (!skipped.includes(msg)) skipped.push(msg);
@@ -161,6 +194,7 @@ export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestRes
           p.createdAt, p.mergedAt ?? p.closedAt, p.additions, p.deletions, p.url, now,
         );
         artifacts++;
+        distinct.set(`${repo}#${p.number}`, state);
         if (state === "merged") merged++;
         else if (state === "open") openCount++;
         else closed++;
@@ -168,8 +202,18 @@ export function harvest(db: DatabaseSync, opts: HarvestOptions = {}): HarvestRes
     }
   }
 
+  let dMerged = 0, dClosed = 0, dOpen = 0;
+  for (const state of distinct.values()) {
+    if (state === "merged") dMerged++;
+    else if (state === "open") dOpen++;
+    else dClosed++;
+  }
+
   return {
     campaigns: campaigns.length, repos: repos.size,
-    artifacts, merged, closed, open: openCount, skipped,
+    artifacts, merged, closed, open: openCount,
+    distinctArtifacts: distinct.size,
+    distinctMerged: dMerged, distinctClosed: dClosed, distinctOpen: dOpen,
+    skipped,
   };
 }

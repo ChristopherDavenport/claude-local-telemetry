@@ -469,9 +469,18 @@ export function init(dbPath?: string): DatabaseSync {
   const db = connect(dbPath);
   db.exec(SCHEMA);
   migrate(db);
+  // Never move the marker *down*. Several builds legitimately share one store --
+  // a launchd sink, a globally installed CLI, an MCP server out of a plugin
+  // cache -- and they upgrade at different times. An older build opening a newer
+  // store does no harm, because it simply never touches the tables it does not
+  // know about. Stamping its own lower version, though, makes the marker lie
+  // about what the file contains, and then `openForRead` refuses a store whose
+  // data is entirely intact. Observed for real: a v0.1.2 sink against a v3
+  // store, after which every `campaigns` command reported the store too old.
   db.prepare(
     "INSERT INTO meta(key, value) VALUES('schema_version', ?) " +
-    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    "ON CONFLICT(key) DO UPDATE SET value = " +
+    "CAST(MAX(CAST(meta.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
   ).run(String(SCHEMA_VERSION));
   return db;
 }
