@@ -245,13 +245,20 @@ function main(): number {
           if (typeof flags["since"] === "string") o.since = flags["since"];
           if (typeof flags["author"] === "string") o.author = flags["author"];
           const r = Artifacts.harvest(conn, o);
+          const dup = r.artifacts - r.distinctArtifacts;
           process.stdout.write(
             `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
             `  repos          ${String(r.repos).padStart(6)}\n` +
-            `  artifacts      ${String(r.artifacts).padStart(6)}\n` +
-            `    merged       ${String(r.merged).padStart(6)}\n` +
-            `    closed       ${String(r.closed).padStart(6)}  (abandoned)\n` +
-            `    open         ${String(r.open).padStart(6)}\n`);
+            `  pull requests  ${String(r.distinctArtifacts).padStart(6)}  distinct\n` +
+            `    merged       ${String(r.distinctMerged).padStart(6)}\n` +
+            `    closed       ${String(r.distinctClosed).padStart(6)}  (abandoned)\n` +
+            `    open         ${String(r.distinctOpen).padStart(6)}\n` +
+            `  attributions   ${String(r.artifacts).padStart(6)}  rows, one per (campaign, PR)\n`);
+          if (dup > 0) {
+            process.stdout.write(
+              `  ${String(dup).padStart(15)}  of those are the same PR claimed by more than one\n` +
+              `                   campaign. Divide spend by the distinct count, not this one.\n`);
+          }
           for (const s2 of r.skipped) process.stdout.write(`  skipped ${s2}\n`);
         } finally { conn.close(); }
         return 0;
