@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.2.0 — 2026-08-17
+
+The store could say what work cost and not whether any of it was kept. This
+release adds the missing half: a derived unit of work, priced, with its
+outcome attached and a name a human recognises.
+
+- **Campaigns.** A campaign is sessions sharing a project close together in
+  time, transitively — derived from `api_requests.cwd` and session timing, never
+  entered by hand. A ticket-shaped unit was not available: over 27 days on the
+  store this was built against, 80% of sessions ran on `HEAD` or `main` and not
+  one branch name was ticket-shaped. Four rules keep it honest, each because the
+  obvious version was wrong on real data — scratch directories link everything,
+  a cwd is not a project (a linked worktree *is* its own top level, so
+  `--show-toplevel` reported one campaign as 57 "projects"), a non-repo parent
+  of other projects is a container, and a period of silence ends a campaign.
+- **`campaigns price`.** Fills `cost_est_usd` for the rows that have exact
+  tokens and no price — which is 99.6% of them, because the sink only sees
+  sessions that ran while it was up. It lands *beside* `cost_usd`, never inside
+  it: overwriting the provider's figure with a computed one would erase the
+  distinction the store exists to keep. Cache tokens are priced at their own
+  rates, which is not a detail — cache reads outnumber fresh input 8.2B to 0.5B.
+  Validated against the 1,016 rows carrying both figures: largest single-row
+  error $0.0000000000.
+- **`campaigns harvest`.** Records merged / closed / open pull requests per
+  campaign, scoped to the authenticated author. `no artifact` is deliberately
+  distinct from `abandoned`: the first may be research, the second was rejected.
+- **`campaigns label`.** Names each campaign from `sessions.first_prompt`, which
+  backfill now extracts. Getting the material was the work — only 2 of 114
+  campaigns had any prompt text before, and a transcript's first `user` record
+  is usually a caveat block, command output, or a tool result rather than the
+  operator. Coverage after: 86% of sessions, zero wrapper text.
+- **The edge graph is kept, not just the clusters.** `session_edges` stores
+  every in-window pair with the inputs to a weight, so a different clustering is
+  a different traversal rather than a re-derivation. `--strategy communities`
+  runs deterministic label propagation over it and reports modularity.
+- **Schema v3**, with `cost_est_usd`, `sessions.first_prompt`,
+  `campaigns.label_model`, and the campaign tables. The version check is
+  one-directional, so an older reader opens a v3 store without complaint.
+
+Known limits, stated because they bound what the numbers mean: the estimate uses
+first-party list rates, so it compares campaigns rather than reconciling a bill;
+artifact attribution is by repository and time window, so unrelated work of your
+own in the same repo during the window still attaches; and clustering splits on
+*when*, not *purpose* — measured on real data, the largest cluster is 97% dense
+with uniform weights, so no community algorithm can separate it and a
+content-derived signal is what the problem actually needs.
+
 ## 0.1.3 — 2026-08-16
 
 Setup documentation rewritten against a first real install, which surfaced a
