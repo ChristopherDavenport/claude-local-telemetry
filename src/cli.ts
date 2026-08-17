@@ -10,9 +10,11 @@
  *   claude-local-telemetry init
  *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
  *   claude-local-telemetry campaigns [derive [--window-hours N] [--quiet-hours N]
- *                                             [--min-weight W] [--refresh-projects]
+ *                                             [--min-weight W] [--strategy communities]
+ *                                             [--refresh-projects]
  *                                    | harvest [--grace-days N] [--since ISO]
  *                                    | price
+ *                                    | label [--relabel] [--batch-size N] [--max-batches N] [--model M]
  *                                    | list]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
@@ -30,6 +32,7 @@ import * as Alias from "./alias.ts";
 import * as Campaigns from "./campaigns.ts";
 import * as Artifacts from "./artifacts.ts";
 import * as Pricing from "./pricing.ts";
+import * as Labeling from "./labeling.ts";
 
 function parse(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -186,15 +189,36 @@ function main(): number {
           if (flags["window-hours"]) opts.windowHours = Number(flags["window-hours"]);
           if (flags["quiet-hours"]) opts.quietHours = Number(flags["quiet-hours"]);
           if (flags["min-weight"]) opts.minWeight = Number(flags["min-weight"]);
+          if (flags["strategy"] === "communities") opts.strategy = "communities";
           const r = Campaigns.derive(conn, opts);
           process.stdout.write(
             `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
             `  edges          ${String(r.edges).padStart(6)}\n` +
+            (r.modularity !== null
+              ? `  modularity     ${r.modularity.toFixed(3).padStart(6)}  (Q; >0.3 is real structure)\n`
+              : "") +
             `  sessions       ${String(r.sessions).padStart(6)}\n` +
             `  projects new   ${String(r.projectsResolved).padStart(6)}\n` +
             `  ephemeral cwds ${String(r.ephemeralSkipped).padStart(6)}  (not linked)\n` +
             `  unattributed   ${String(r.unattributed).padStart(6)}  (no project touched)\n`,
           );
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "label") {
+        const conn = init(db);
+        try {
+          const o: Labeling.LabelOptions = { relabel: flags["relabel"] === true };
+          if (flags["batch-size"]) o.batchSize = Number(flags["batch-size"]);
+          if (flags["max-batches"]) o.maxBatches = Number(flags["max-batches"]);
+          if (typeof flags["model"] === "string") o.model = flags["model"];
+          const r = Labeling.label(conn, o);
+          process.stdout.write(
+            `  considered     ${String(r.considered).padStart(6)}\n` +
+            `  labelled       ${String(r.labelled).padStart(6)}\n` +
+            `  batches        ${String(r.batches).padStart(6)}  model calls\n` +
+            `  no material    ${String(r.skippedNoMaterial).padStart(6)}  no prompt on any session\n`);
+          for (const f of r.failures) process.stdout.write(`  failed: ${f}\n`);
         } finally { conn.close(); }
         return 0;
       }

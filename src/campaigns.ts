@@ -36,6 +36,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
+import * as Communities from "./communities.ts";
 
 export interface DeriveOptions {
   /** Max gap between two sessions on the same project for them to link. */
@@ -44,6 +45,13 @@ export interface DeriveOptions {
   quietHours?: number;
   /** Drop edges below this weight before clustering. 0 keeps every edge. */
   minWeight?: number;
+  /**
+   * How to turn the edge graph into clusters. "components" asks whether any
+   * path exists; "communities" asks whether the sessions are more densely
+   * connected to each other than to everything else, which is what separates
+   * two efforts that share a repository.
+   */
+  strategy?: "components" | "communities";
   /** Re-resolve every cwd instead of trusting the `projects` cache. */
   refreshProjects?: boolean;
   now?: string;
@@ -52,6 +60,8 @@ export interface DeriveOptions {
 export interface DeriveResult {
   campaigns: number;
   edges: number;
+  /** Newman-Girvan Q of the partition. Null when the strategy is components. */
+  modularity: number | null;
   sessions: number;
   projectsResolved: number;
   ephemeralSkipped: number;
@@ -282,16 +292,35 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
   db.exec("DELETE FROM session_edges");
   const insEdge = db.prepare(
     "INSERT OR REPLACE INTO session_edges(a,b,shared_projects,gap_seconds,weight) VALUES(?,?,?,?,?)");
-  const uf = new UnionFind();
-  for (const s of sessions) uf.find(s.session_id);
   const minWeight = opts.minWeight ?? 0;
+  const kept: Communities.Edge[] = [];
   for (const e of edges.values()) {
     // More projects in common is stronger evidence of one purpose; a longer gap
     // is weaker. Monotonic in both, and the inputs are stored beside it so a
     // different formula can be applied later without re-deriving anything.
     const weight = e.shared / (1 + e.gap / 86400);
     insEdge.run(e.a, e.b, e.shared, e.gap, weight);
-    if (weight >= minWeight) uf.union(e.a, e.b);
+    if (weight >= minWeight) kept.push({ a: e.a, b: e.b, weight });
+  }
+
+  // Two readings of the same graph. Components asks whether any path exists,
+  // which on a graph with a hub repository is always yes. Communities asks
+  // whether these sessions are denser among themselves than with everything
+  // else -- the question that separates two efforts sharing that hub.
+  const strategy = opts.strategy ?? "components";
+  const groupOf = new Map<string, string>();
+  let q: number | null = null;
+
+  if (strategy === "communities") {
+    const attributed = sessions.map((s) => s.session_id);
+    const r = Communities.detect(attributed, kept);
+    q = r.modularity;
+    for (const [n, c] of r.communityOf) groupOf.set(n, c);
+  } else {
+    const uf = new UnionFind();
+    for (const s of sessions) uf.find(s.session_id);
+    for (const e of kept) uf.union(e.a, e.b);
+    for (const s of sessions) groupOf.set(s.session_id, uf.find(s.session_id));
   }
 
   // Only sessions that touched a real project can be attributed. A session with
@@ -302,7 +331,7 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
   let unattributed = 0;
   for (const s of sessions) {
     if (!sessionProjects.has(s.session_id)) { unattributed++; continue; }
-    const root = uf.find(s.session_id);
+    const root = groupOf.get(s.session_id)!;
     (rawClusters.get(root) ?? rawClusters.set(root, []).get(root)!).push(s.session_id);
   }
 
@@ -336,8 +365,9 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
 
   // Names the traversal, so rows from two strategies are distinguishable in a
   // table that otherwise looks identical.
-  const strategy = `components+quiet:${opts.quietHours ?? 8}h` +
-    (minWeight > 0 ? `+minw:${minWeight}` : "");
+  const strategyLabel = `${strategy}+quiet:${opts.quietHours ?? 8}h` +
+    (minWeight > 0 ? `+minw:${minWeight}` : "") +
+    (q !== null ? `+q:${q.toFixed(3)}` : "");
 
   const priorLabels = new Map<string, string>();
   for (const r of db.prepare("SELECT campaign_id, label FROM campaigns WHERE label IS NOT NULL")
@@ -386,7 +416,7 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
         }
       }
       insCamp.run(
-        id, strategy, priorLabels.get(id) ?? null,
+        id, strategyLabel, priorLabels.get(id) ?? null,
         new Date(Math.min(...ids.map((s) => span.get(s)!.start))).toISOString(),
         new Date(Math.max(...ids.map((s) => span.get(s)!.end))).toISOString(),
         ids.length, projects.size, inTok, outTok, sawCost ? cost : null, now,
@@ -400,6 +430,7 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
   return {
     campaigns: clusters.length,
     edges: edges.size,
+    modularity: q,
     sessions: sessions.length - unattributed,
     projectsResolved: resolved,
     ephemeralSkipped: ephemeral,
