@@ -48,7 +48,7 @@ export const TABLES = [
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
   "agent_runs", "workflow_runs",
   "projects", "campaigns", "campaign_sessions", "campaign_projects",
-  "session_edges",
+  "session_edges", "campaign_artifacts",
 ] as const;
 
 /**
@@ -368,6 +368,26 @@ CREATE TABLE IF NOT EXISTS campaign_sessions (
     session_id  TEXT NOT NULL,
     PRIMARY KEY (campaign_id, session_id)
 ) STRICT;
+
+-- What a campaign produced. See src/artifacts.ts for why merged/closed/open is
+-- a split of spend rather than a verdict, and why harvested_at is on the row:
+-- "open" is a fact about the moment it was observed, not about the work.
+CREATE TABLE IF NOT EXISTS campaign_artifacts (
+    campaign_id  TEXT NOT NULL,
+    kind         TEXT NOT NULL,          -- pr (commit, release: later)
+    repo         TEXT NOT NULL,
+    ref          TEXT NOT NULL,          -- pull request number
+    state        TEXT,                   -- merged | closed | open
+    title        TEXT,
+    created_at   TEXT,
+    resolved_at  TEXT,                   -- merged_at, else closed_at
+    additions    INTEGER,
+    deletions    INTEGER,
+    url          TEXT,
+    harvested_at TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, kind, repo, ref)
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_art_state ON campaign_artifacts(state);
 
 CREATE TABLE IF NOT EXISTS campaign_projects (
     campaign_id TEXT NOT NULL,

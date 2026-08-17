@@ -20,6 +20,7 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { init } from "../src/store.ts";
 import { derive, resolveProject } from "../src/campaigns.ts";
+import { repoOf } from "../src/artifacts.ts";
 
 let work: string;
 let db: DatabaseSync;
@@ -204,5 +205,43 @@ test("the strategy that produced a campaign is recorded", () => {
   derive(db, { quietHours: 8, minWeight: 1.5 });
   const b = db.prepare("SELECT strategy FROM campaigns").get() as { strategy: string };
   assert.match(b.strategy, /minw:1\.5/, "two strategies must be distinguishable in the table");
+  db.close();
+});
+
+test("only a project key that names a GitHub repo is harvestable", () => {
+  assert.equal(repoOf("github.com/owner/name"), "owner/name");
+  assert.equal(repoOf("/Users/someone/Documents/Work/thing"), null,
+    "a local path has no pull requests to read");
+  assert.equal(repoOf("github.com/owner/name/extra"), null,
+    "an over-deep key is not a repo and must not be guessed at");
+});
+
+test("an outcome is derived from artifacts, and absence is its own answer", () => {
+  // 'no artifact' is deliberately distinct from 'abandoned': the first is work
+  // that produced nothing durable, which may be research; the second is work
+  // that produced something and had it rejected. Collapsing them would hide
+  // the more interesting of the two.
+  db = seed([
+    { id: "s1", start: H(0), end: H(1), cwds: ["/proj/a"] },
+    { id: "s2", start: H(30), end: H(31), cwds: ["/proj/b"] },
+  ]);
+  derive(db, { quietHours: 8 });
+  const ids = (db.prepare("SELECT campaign_id FROM campaigns ORDER BY started_at").all() as
+    Array<{ campaign_id: string }>).map((r) => r.campaign_id);
+  assert.equal(ids.length, 2);
+
+  db.prepare(
+    "INSERT INTO campaign_artifacts(campaign_id,kind,repo,ref,state,harvested_at) " +
+    "VALUES(?,'pr','o/r','1','closed','2026-01-02T00:00:00Z')").run(ids[0]!);
+
+  const rows = db.prepare(`
+    SELECT c.campaign_id,
+      CASE WHEN SUM(a.state='merged')>0 THEN 'shipped'
+           WHEN SUM(a.state='closed')>0 THEN 'abandoned'
+           ELSE 'no artifact' END o
+    FROM campaigns c LEFT JOIN campaign_artifacts a USING(campaign_id)
+    GROUP BY c.campaign_id ORDER BY c.started_at`).all() as Array<{ o: string }>;
+  assert.equal(rows[0]!.o, "abandoned");
+  assert.equal(rows[1]!.o, "no artifact");
   db.close();
 });

@@ -10,7 +10,9 @@
  *   claude-local-telemetry init
  *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
  *   claude-local-telemetry campaigns [derive [--window-hours N] [--quiet-hours N]
- *                                             [--min-weight W] [--refresh-projects] | list]
+ *                                             [--min-weight W] [--refresh-projects]
+ *                                    | harvest [--grace-days N] [--since ISO]
+ *                                    | list]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected
@@ -25,6 +27,7 @@ import { startApi } from "./api.ts";
 import { serve as serveMcp } from "./mcp.ts";
 import * as Alias from "./alias.ts";
 import * as Campaigns from "./campaigns.ts";
+import * as Artifacts from "./artifacts.ts";
 
 function parse(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -190,6 +193,24 @@ function main(): number {
             `  ephemeral cwds ${String(r.ephemeralSkipped).padStart(6)}  (not linked)\n` +
             `  unattributed   ${String(r.unattributed).padStart(6)}  (no project touched)\n`,
           );
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "harvest") {
+        const conn = init(db);
+        try {
+          const o: Artifacts.HarvestOptions = {};
+          if (flags["grace-days"]) o.graceDays = Number(flags["grace-days"]);
+          if (typeof flags["since"] === "string") o.since = flags["since"];
+          const r = Artifacts.harvest(conn, o);
+          process.stdout.write(
+            `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
+            `  repos          ${String(r.repos).padStart(6)}\n` +
+            `  artifacts      ${String(r.artifacts).padStart(6)}\n` +
+            `    merged       ${String(r.merged).padStart(6)}\n` +
+            `    closed       ${String(r.closed).padStart(6)}  (abandoned)\n` +
+            `    open         ${String(r.open).padStart(6)}\n`);
+          for (const s2 of r.skipped) process.stdout.write(`  skipped ${s2}\n`);
         } finally { conn.close(); }
         return 0;
       }
