@@ -86,6 +86,12 @@ const V3_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
   // transcripts are the whole retention window -- so a campaign could be priced
   // and dated and still be unnameable. This is what makes it nameable.
   sessions: [["first_prompt", "TEXT"]],
+  // Which model named the campaign. The naming call runs through the `claude`
+  // CLI and is therefore parameterised by an environment this package does not
+  // control -- see src/labeling.ts. The environment being implicit is a real
+  // weakness; the result being unattributable would be a worse one, so the
+  // model that produced each label is recorded next to it.
+  campaigns: [["label_model", "TEXT"]],
 };
 
 const SCHEMA = `

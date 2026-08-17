@@ -24,6 +24,37 @@
  *
  * Batched, because the round trip dominates. Twelve campaigns per call turns a
  * hundred-plus process spawns into single digits.
+ *
+ * What this call inherits, and cannot currently shed
+ * --------------------------------------------------
+ * Shelling out buys the credentials but takes the whole ambient environment
+ * with them. This function is implicitly parameterised by things outside the
+ * package, and all of the following were measured rather than assumed:
+ *
+ *   - **The model.** `--model` pins it, and doing so is load-bearing: without
+ *     the flag the call inherits the operator's configured default, which on
+ *     the machine this was written against is an Opus tier at five times the
+ *     price of the Haiku this asks for.
+ *   - **Skills and plugins.** A nested call is shown ~58 skills from whatever
+ *     the operator has enabled. `--settings '{"enabledPlugins":{}}'` does NOT
+ *     strip them -- tested, same count with and without -- so a naming call
+ *     carries the operator's entire plugin surface as context. `--bare` does
+ *     strip it (58 -> 3), but changes behaviour enough that this prompt stops
+ *     returning JSON, so adopting it needs prompt work and re-validation.
+ *   - **The working directory.** CLAUDE.md discovery is cwd-relative, so a
+ *     naming run started in a repository that ships one feeds it to the model.
+ *   - **Hooks.** The operator's PreToolUse and Stop hooks fire on these calls.
+ *
+ * And the call is not reproducible in the first place: the same batch can
+ * return different names on two runs. Nothing here is deterministic, and
+ * nothing downstream should assume it is. That is the opposite of
+ * `communities.ts`, whose *label propagation* is a pure graph algorithm made
+ * deterministic on purpose -- an unfortunate collision of the word "label"
+ * between a Raghavan-style community algorithm and naming a campaign.
+ *
+ * The mitigation is attribution rather than isolation: `campaigns.label_model`
+ * records which model produced each name, so a label can at least be traced to
+ * the thing that wrote it.
  */
 
 import type { DatabaseSync } from "node:sqlite";
@@ -165,7 +196,8 @@ export function label(db: DatabaseSync, opts: LabelOptions = {}): LabelResult {
   const usable = all.filter((c) => c.prompts.length > 0);
   const skipped = all.length - usable.length;
 
-  const upd = db.prepare("UPDATE campaigns SET label=? WHERE campaign_id=?");
+  const upd = db.prepare(
+    "UPDATE campaigns SET label=?, label_model=? WHERE campaign_id=?");
   const failures: string[] = [];
   let labelled = 0, batches = 0;
 
@@ -191,7 +223,7 @@ export function label(db: DatabaseSync, opts: LabelOptions = {}): LabelResult {
         // Only ids we asked about: a hallucinated id must not create a row or
         // overwrite an unrelated campaign.
         if (!wanted.has(id)) continue;
-        upd.run(text, id);
+        upd.run(text, model, id);
         labelled++;
       }
       db.exec("COMMIT");
