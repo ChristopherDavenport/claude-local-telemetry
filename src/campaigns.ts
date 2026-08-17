@@ -347,8 +347,13 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
 
   const usage = new Map<string, { i: number; o: number; c: number | null }>();
   for (const r of db.prepare(
+    // Measured cost where the provider gave one, the estimate otherwise. A
+    // campaign spanning the sink's start date draws on both, and preferring the
+    // measured figure per row keeps the mix as accurate as it can be rather
+    // than forcing a choice between an incomplete column and an estimated one.
     "SELECT session_id, SUM(COALESCE(input_tokens,0)) i, SUM(COALESCE(output_tokens,0)) o, " +
-    "SUM(cost_usd) c FROM api_requests WHERE session_id IS NOT NULL GROUP BY session_id",
+    "SUM(COALESCE(cost_usd, cost_est_usd)) c FROM api_requests " +
+    "WHERE session_id IS NOT NULL GROUP BY session_id",
   ).all() as Array<{ session_id: string; i: number; o: number; c: number | null }>) {
     usage.set(r.session_id, { i: r.i, o: r.o, c: r.c });
   }
