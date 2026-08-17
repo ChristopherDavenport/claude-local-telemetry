@@ -153,3 +153,56 @@ test("a vanished directory outside any repo stays itself, not its parent", () =>
   assert.equal(r.key, gone);
   assert.equal(r.kind, "path");
 });
+
+test("the edge graph is persisted, not just the clusters", () => {
+  // The point of keeping it: connected components is the first strategy, not
+  // the last. Weighted cutting and community detection are a different
+  // traversal of this table, and neither is possible if only the resulting
+  // clusters were stored.
+  db = seed([
+    { id: "s1", start: H(0), end: H(1), cwds: ["/proj/a", "/proj/b"] },
+    { id: "s2", start: H(2), end: H(3), cwds: ["/proj/a", "/proj/b"] },
+    { id: "s3", start: H(4), end: H(5), cwds: ["/proj/a"] },
+  ]);
+  const r = derive(db, { quietHours: 8 });
+  assert.equal(r.edges, 3, "every pair inside the window, not just consecutive ones");
+
+  const strong = db.prepare(
+    "SELECT shared_projects, gap_seconds FROM session_edges WHERE a='s1' AND b='s2'").get() as
+    { shared_projects: number; gap_seconds: number };
+  assert.equal(strong.shared_projects, 2, "two projects in common is stronger evidence");
+  assert.equal(strong.gap_seconds, 3600);
+
+  const weak = db.prepare(
+    "SELECT shared_projects FROM session_edges WHERE a='s1' AND b='s3'").get() as
+    { shared_projects: number };
+  assert.equal(weak.shared_projects, 1);
+  db.close();
+});
+
+test("raising min-weight cuts weak edges and splits campaigns", () => {
+  db = seed([
+    { id: "s1", start: H(0), end: H(1), cwds: ["/proj/a", "/proj/b"] },
+    { id: "s2", start: H(2), end: H(3), cwds: ["/proj/a", "/proj/b"] },
+    { id: "s3", start: H(50), end: H(51), cwds: ["/proj/a"] },
+  ]);
+  // Everything connected: one campaign per quiet run, so s3 splits on silence.
+  assert.equal(derive(db, { quietHours: 200, minWeight: 0 }).campaigns, 1);
+  // s1-s3 and s2-s3 are single-project and two days apart, so they fall first.
+  assert.equal(
+    derive(db, { quietHours: 200, minWeight: 1 }).campaigns, 2,
+    "the weak long-range edge should be the one that breaks",
+  );
+  db.close();
+});
+
+test("the strategy that produced a campaign is recorded", () => {
+  db = seed([{ id: "s1", start: H(0), end: H(1), cwds: ["/proj/a"] }]);
+  derive(db, { quietHours: 8 });
+  const a = db.prepare("SELECT strategy FROM campaigns").get() as { strategy: string };
+  assert.match(a.strategy, /components\+quiet:8h/);
+  derive(db, { quietHours: 8, minWeight: 1.5 });
+  const b = db.prepare("SELECT strategy FROM campaigns").get() as { strategy: string };
+  assert.match(b.strategy, /minw:1\.5/, "two strategies must be distinguishable in the table");
+  db.close();
+});

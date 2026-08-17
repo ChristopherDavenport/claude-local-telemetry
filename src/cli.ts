@@ -9,7 +9,8 @@
  *   claude-local-telemetry stats
  *   claude-local-telemetry init
  *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
- *   claude-local-telemetry campaigns [derive [--window-hours N] [--refresh-projects] | list]
+ *   claude-local-telemetry campaigns [derive [--window-hours N] [--quiet-hours N]
+ *                                             [--min-weight W] [--refresh-projects] | list]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected
@@ -178,9 +179,12 @@ function main(): number {
             refreshProjects: flags["refresh-projects"] === true,
           };
           if (flags["window-hours"]) opts.windowHours = Number(flags["window-hours"]);
+          if (flags["quiet-hours"]) opts.quietHours = Number(flags["quiet-hours"]);
+          if (flags["min-weight"]) opts.minWeight = Number(flags["min-weight"]);
           const r = Campaigns.derive(conn, opts);
           process.stdout.write(
             `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
+            `  edges          ${String(r.edges).padStart(6)}\n` +
             `  sessions       ${String(r.sessions).padStart(6)}\n` +
             `  projects new   ${String(r.projectsResolved).padStart(6)}\n` +
             `  ephemeral cwds ${String(r.ephemeralSkipped).padStart(6)}  (not linked)\n` +

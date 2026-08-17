@@ -42,6 +42,8 @@ export interface DeriveOptions {
   windowHours?: number;
   /** A period this long with no session at all ends a campaign. */
   quietHours?: number;
+  /** Drop edges below this weight before clustering. 0 keeps every edge. */
+  minWeight?: number;
   /** Re-resolve every cwd instead of trusting the `projects` cache. */
   refreshProjects?: boolean;
   now?: string;
@@ -49,6 +51,7 @@ export interface DeriveOptions {
 
 export interface DeriveResult {
   campaigns: number;
+  edges: number;
   sessions: number;
   projectsResolved: number;
   ephemeralSkipped: number;
@@ -244,21 +247,51 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
     span.set(s.session_id, { start, end: Number.isNaN(end) ? start : end });
   }
 
-  // Link consecutive sessions on a project when the gap is under the window.
-  // Sorting first makes this linear per project and gives the same connected
-  // components as comparing every pair: linking is transitive, so a chain of
-  // short gaps is one campaign even when its ends are weeks apart. That is the
-  // intended reading of "sustained work on a thing", not a bug.
-  const uf = new UnionFind();
-  for (const s of sessions) uf.find(s.session_id);
+  // Build the graph, then cluster from it -- rather than clustering directly and
+  // discarding the edges. Connected components is the first strategy, not the
+  // last: it cannot separate two efforts that share a repository on the same
+  // afternoon, and doing so needs weak-edge cutting or community detection.
+  // Those are a different traversal of this same graph, so the graph is what
+  // gets stored. `session_edges` is the artifact that keeps that door open.
+  //
+  // Every pair inside the window, not just consecutive ones: a chain carries the
+  // same connected components but throws away the density that a weighted method
+  // needs. The forward scan stops as soon as the window closes, so the cost is
+  // proportional to the pairs that actually exist rather than to n^2.
+  const edges = new Map<string, { a: string; b: string; shared: number; gap: number }>();
   for (const [, ids] of byProject) {
     const ordered = [...new Set(ids)]
       .filter((id) => span.has(id))
-      .sort((a, b) => span.get(a)!.start - span.get(b)!.start);
-    for (let i = 1; i < ordered.length; i++) {
-      const prev = ordered[i - 1]!, cur = ordered[i]!;
-      if (span.get(cur)!.start - span.get(prev)!.end <= windowMs) uf.union(prev, cur);
+      .sort((x, y) => span.get(x)!.start - span.get(y)!.start);
+    for (let i = 0; i < ordered.length; i++) {
+      const si = ordered[i]!;
+      for (let j = i + 1; j < ordered.length; j++) {
+        const sj = ordered[j]!;
+        const gapMs = span.get(sj)!.start - span.get(si)!.end;
+        if (gapMs > windowMs) break;
+        const [a, b] = si < sj ? [si, sj] : [sj, si];
+        const key = `${a} ${b}`;
+        const gap = Math.max(0, Math.round(gapMs / 1000));
+        const hit = edges.get(key);
+        if (hit) { hit.shared++; hit.gap = Math.min(hit.gap, gap); }
+        else edges.set(key, { a, b, shared: 1, gap });
+      }
     }
+  }
+
+  db.exec("DELETE FROM session_edges");
+  const insEdge = db.prepare(
+    "INSERT OR REPLACE INTO session_edges(a,b,shared_projects,gap_seconds,weight) VALUES(?,?,?,?,?)");
+  const uf = new UnionFind();
+  for (const s of sessions) uf.find(s.session_id);
+  const minWeight = opts.minWeight ?? 0;
+  for (const e of edges.values()) {
+    // More projects in common is stronger evidence of one purpose; a longer gap
+    // is weaker. Monotonic in both, and the inputs are stored beside it so a
+    // different formula can be applied later without re-deriving anything.
+    const weight = e.shared / (1 + e.gap / 86400);
+    insEdge.run(e.a, e.b, e.shared, e.gap, weight);
+    if (weight >= minWeight) uf.union(e.a, e.b);
   }
 
   // Only sessions that touched a real project can be attributed. A session with
@@ -301,6 +334,11 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
     if (run.length) clusters.push(run);
   }
 
+  // Names the traversal, so rows from two strategies are distinguishable in a
+  // table that otherwise looks identical.
+  const strategy = `components+quiet:${opts.quietHours ?? 8}h` +
+    (minWeight > 0 ? `+minw:${minWeight}` : "");
+
   const priorLabels = new Map<string, string>();
   for (const r of db.prepare("SELECT campaign_id, label FROM campaigns WHERE label IS NOT NULL")
     .all() as Array<{ campaign_id: string; label: string }>) {
@@ -322,8 +360,8 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
     db.exec("DELETE FROM campaigns");
 
     const insCamp = db.prepare(
-      "INSERT INTO campaigns(campaign_id,label,started_at,ended_at,session_count," +
-      "project_count,input_tokens,output_tokens,cost_usd,derived_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO campaigns(campaign_id,strategy,label,started_at,ended_at,session_count," +
+      "project_count,input_tokens,output_tokens,cost_usd,derived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
     );
     const insSess = db.prepare("INSERT INTO campaign_sessions(campaign_id,session_id) VALUES(?,?)");
     const insProj = db.prepare(
@@ -343,7 +381,7 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
         }
       }
       insCamp.run(
-        id, priorLabels.get(id) ?? null,
+        id, strategy, priorLabels.get(id) ?? null,
         new Date(Math.min(...ids.map((s) => span.get(s)!.start))).toISOString(),
         new Date(Math.max(...ids.map((s) => span.get(s)!.end))).toISOString(),
         ids.length, projects.size, inTok, outTok, sawCost ? cost : null, now,
@@ -356,6 +394,7 @@ export function derive(db: DatabaseSync, opts: DeriveOptions = {}): DeriveResult
 
   return {
     campaigns: clusters.length,
+    edges: edges.size,
     sessions: sessions.length - unattributed,
     projectsResolved: resolved,
     ephemeralSkipped: ephemeral,

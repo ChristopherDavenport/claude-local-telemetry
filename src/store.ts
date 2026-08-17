@@ -48,6 +48,7 @@ export const TABLES = [
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
   "agent_runs", "workflow_runs",
   "projects", "campaigns", "campaign_sessions", "campaign_projects",
+  "session_edges",
 ] as const;
 
 /**
@@ -322,8 +323,34 @@ CREATE INDEX IF NOT EXISTS ix_proj_key ON projects(project_key);
 -- The ticket-shaped alternative was rejected on evidence: over 27 days, 80% of
 -- sessions ran on HEAD or main and not one branch name was ticket-shaped. A
 -- ledger keyed on something that is not there measures nothing.
+-- The graph the clustering runs on, kept rather than thrown away.
+--
+-- Connected components plus a quiet-period split is the first strategy, not the
+-- last one: it splits on *when*, and two unrelated efforts sharing one
+-- repository on the same afternoon still land together. Fixing that means
+-- weighting edges and cutting weak ones, or running community detection.
+-- Neither can be done later if only the resulting clusters were stored, so the
+-- edges and the inputs to a weight are persisted here and the clustering reads
+-- from this table. A new strategy is then a different traversal of the same
+-- graph, not a re-derivation -- and campaigns.strategy records which one
+-- produced a row, so two strategies can be compared on identical input.
+--
+-- The weight column is the current formula and is deliberately recomputable:
+-- the raw inputs it is derived from are stored beside it.
+CREATE TABLE IF NOT EXISTS session_edges (
+    a               TEXT NOT NULL,          -- lexically smaller session_id
+    b               TEXT NOT NULL,
+    shared_projects INTEGER NOT NULL,
+    gap_seconds     INTEGER NOT NULL,       -- 0 when the sessions overlap
+    weight          REAL NOT NULL,
+    PRIMARY KEY (a, b)
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_edge_weight ON session_edges(weight);
+CREATE INDEX IF NOT EXISTS ix_edge_b ON session_edges(b);
+
 CREATE TABLE IF NOT EXISTS campaigns (
     campaign_id   TEXT PRIMARY KEY,
+    strategy      TEXT NOT NULL,
     label         TEXT,
     started_at    TEXT NOT NULL,
     ended_at      TEXT NOT NULL,
