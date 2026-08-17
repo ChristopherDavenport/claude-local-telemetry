@@ -1,0 +1,15 @@
+{
+  "$comment": [
+    "Names the verify command for this repo, which arms the guardrails plugin's",
+    "Stop gate: an agent may not declare itself done on a red build.",
+    "",
+    "The gate is opt-in by design and stays inert until CLAUDE_GUARDRAILS_VERIFY",
+    "is set. Scoped here rather than in ~/.claude/settings.json so it applies",
+    "exactly where a real verify target exists.",
+    "",
+    "Matches what .github/workflows/checks.yml runs. ~2s."
+  ],
+  "env": {
+    "CLAUDE_GUARDRAILS_VERIFY": "npm run typecheck && npm test"
+  }
+}
