@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function defaultDbPath(): string {
   return process.env["CLAUDE_TELEMETRY_DB"]
@@ -47,6 +47,8 @@ export const TABLES = [
   "api_requests", "tool_calls", "events", "spans", "metrics",
   "sessions", "plugin_loads", "plugin_alias", "hook_runs",
   "agent_runs", "workflow_runs",
+  "projects", "campaigns", "campaign_sessions", "campaign_projects",
+  "session_edges", "campaign_artifacts",
 ] as const;
 
 /**
@@ -66,6 +68,30 @@ const V2_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
   api_requests: [["agent_id", "TEXT"], ["workflow_run_id", "TEXT"],
                  ["plugin_id_hash", "TEXT"]],
   tool_calls: [["agent_id", "TEXT"], ["workflow_run_id", "TEXT"]],
+};
+
+/**
+ * v3: a derived dollar figure, kept apart from the measured one.
+ *
+ * cost_usd is what the provider reported and exists on 0.4% of rows -- only
+ * those the OTLP sink saw. Everything backfilled from a transcript has exact
+ * token counts and no price. Writing an estimate into cost_usd would make the
+ * two indistinguishable and quietly turn a measurement into a guess, so the
+ * estimate gets its own column and every reader chooses which it wants.
+ */
+const V3_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
+  api_requests: [["cost_est_usd", "REAL"]],
+  // The session's opening ask, in the operator's own words. Only 2 of 114
+  // campaigns had any prompt text from OTel -- that path is hours old and the
+  // transcripts are the whole retention window -- so a campaign could be priced
+  // and dated and still be unnameable. This is what makes it nameable.
+  sessions: [["first_prompt", "TEXT"]],
+  // Which model named the campaign. The naming call runs through the `claude`
+  // CLI and is therefore parameterised by an environment this package does not
+  // control -- see src/labeling.ts. The environment being implicit is a real
+  // weakness; the result being unattributable would be a worse one, so the
+  // model that produced each label is recorded next to it.
+  campaigns: [["label_model", "TEXT"]],
 };
 
 const SCHEMA = `
@@ -291,6 +317,107 @@ CREATE TABLE IF NOT EXISTS plugin_alias (
     confidence     TEXT NOT NULL,
     noted_at       TEXT
 ) STRICT;
+
+-- A cwd resolved to the thing it is part of, so that /repo and /repo/sub, and
+-- two clones of one repository under different parents, count as one project.
+-- Populated by \`campaigns derive\`; cached because resolving it shells out to
+-- git once per distinct directory and most of them never change.
+--
+-- kind records how the key was obtained, because the three are not equally
+-- trustworthy and a later reader should be able to tell them apart:
+--   remote    the git remote URL, normalised. Merges separate clones.
+--   toplevel  the work-tree root. Merges subdirectories, not clones.
+--   path      the cwd verbatim. The directory is gone or was never a repo.
+--   ephemeral scratch (/tmp, /var/folders). Deliberately NOT a project: these
+--             are shared by unrelated work and would link it all together.
+CREATE TABLE IF NOT EXISTS projects (
+    cwd         TEXT PRIMARY KEY,
+    project_key TEXT,
+    kind        TEXT NOT NULL,
+    resolved_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_proj_key ON projects(project_key);
+
+-- A campaign is the unit of work this operator actually has: a set of sessions
+-- spanning several repositories over several days that share one purpose. It
+-- is derived, never entered. Nothing here is written by hand -- the inputs are
+-- session timing and the projects each session touched, both of which are
+-- recorded as a side effect of working.
+--
+-- The ticket-shaped alternative was rejected on evidence: over 27 days, 80% of
+-- sessions ran on HEAD or main and not one branch name was ticket-shaped. A
+-- ledger keyed on something that is not there measures nothing.
+-- The graph the clustering runs on, kept rather than thrown away.
+--
+-- Connected components plus a quiet-period split is the first strategy, not the
+-- last one: it splits on *when*, and two unrelated efforts sharing one
+-- repository on the same afternoon still land together. Fixing that means
+-- weighting edges and cutting weak ones, or running community detection.
+-- Neither can be done later if only the resulting clusters were stored, so the
+-- edges and the inputs to a weight are persisted here and the clustering reads
+-- from this table. A new strategy is then a different traversal of the same
+-- graph, not a re-derivation -- and campaigns.strategy records which one
+-- produced a row, so two strategies can be compared on identical input.
+--
+-- The weight column is the current formula and is deliberately recomputable:
+-- the raw inputs it is derived from are stored beside it.
+CREATE TABLE IF NOT EXISTS session_edges (
+    a               TEXT NOT NULL,          -- lexically smaller session_id
+    b               TEXT NOT NULL,
+    shared_projects INTEGER NOT NULL,
+    gap_seconds     INTEGER NOT NULL,       -- 0 when the sessions overlap
+    weight          REAL NOT NULL,
+    PRIMARY KEY (a, b)
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_edge_weight ON session_edges(weight);
+CREATE INDEX IF NOT EXISTS ix_edge_b ON session_edges(b);
+
+CREATE TABLE IF NOT EXISTS campaigns (
+    campaign_id   TEXT PRIMARY KEY,
+    strategy      TEXT NOT NULL,
+    label         TEXT,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT NOT NULL,
+    session_count INTEGER NOT NULL,
+    project_count INTEGER NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_usd      REAL,
+    derived_at    TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_camp_started ON campaigns(started_at);
+
+CREATE TABLE IF NOT EXISTS campaign_sessions (
+    campaign_id TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, session_id)
+) STRICT;
+
+-- What a campaign produced. See src/artifacts.ts for why merged/closed/open is
+-- a split of spend rather than a verdict, and why harvested_at is on the row:
+-- "open" is a fact about the moment it was observed, not about the work.
+CREATE TABLE IF NOT EXISTS campaign_artifacts (
+    campaign_id  TEXT NOT NULL,
+    kind         TEXT NOT NULL,          -- pr (commit, release: later)
+    repo         TEXT NOT NULL,
+    ref          TEXT NOT NULL,          -- pull request number
+    state        TEXT,                   -- merged | closed | open
+    title        TEXT,
+    created_at   TEXT,
+    resolved_at  TEXT,                   -- merged_at, else closed_at
+    additions    INTEGER,
+    deletions    INTEGER,
+    url          TEXT,
+    harvested_at TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, kind, repo, ref)
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_art_state ON campaign_artifacts(state);
+
+CREATE TABLE IF NOT EXISTS campaign_projects (
+    campaign_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, project_key)
+) STRICT;
 `;
 
 export interface OpenOptions {
@@ -325,10 +452,15 @@ function columnsOf(db: DatabaseSync, table: string): Set<string> {
  * is nullable with no default, so existing rows stay valid under STRICT.
  */
 function migrate(db: DatabaseSync): void {
-  for (const [table, cols] of Object.entries(V2_COLUMNS)) {
-    const have = columnsOf(db, table);
-    for (const [name, decl] of cols) {
-      if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+  // Each version's map is applied in turn rather than merged: two versions can
+  // add columns to the same table, and a spread would silently drop the older
+  // entry when both name it.
+  for (const version of [V2_COLUMNS, V3_COLUMNS]) {
+    for (const [table, cols] of Object.entries(version)) {
+      const have = columnsOf(db, table);
+      for (const [name, decl] of cols) {
+        if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+      }
     }
   }
 }

@@ -9,6 +9,13 @@
  *   claude-local-telemetry stats
  *   claude-local-telemetry init
  *   claude-local-telemetry alias   [list|derive|set <hash> <name>|rm <hash>]
+ *   claude-local-telemetry campaigns [derive [--window-hours N] [--quiet-hours N]
+ *                                             [--min-weight W] [--strategy communities]
+ *                                             [--refresh-projects]
+ *                                    | harvest [--grace-days N] [--since ISO]
+ *                                    | price
+ *                                    | label [--relabel] [--batch-size N] [--max-batches N] [--model M]
+ *                                    | list]
  *
  * The shebang suppresses node:sqlite's ExperimentalWarning. That is cosmetic for
  * every subcommand except `mcp`, where the client reads stdio and unexpected
@@ -22,6 +29,10 @@ import { startSink } from "./sink.ts";
 import { startApi } from "./api.ts";
 import { serve as serveMcp } from "./mcp.ts";
 import * as Alias from "./alias.ts";
+import * as Campaigns from "./campaigns.ts";
+import * as Artifacts from "./artifacts.ts";
+import * as Pricing from "./pricing.ts";
+import * as Labeling from "./labeling.ts";
 
 function parse(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -164,6 +175,111 @@ function main(): number {
         process.stdout.write(`unknown: alias ${sub}\n`);
         return 1;
       } finally { conn.close(); }
+    }
+    case "campaigns": {
+      const sub = rest[1] ?? "list";
+      if (sub === "derive") {
+        // Writes, so it takes a read-write handle and runs the schema first --
+        // an older store has no campaigns table and init() is idempotent.
+        const conn = init(db);
+        try {
+          const opts: Campaigns.DeriveOptions = {
+            refreshProjects: flags["refresh-projects"] === true,
+          };
+          if (flags["window-hours"]) opts.windowHours = Number(flags["window-hours"]);
+          if (flags["quiet-hours"]) opts.quietHours = Number(flags["quiet-hours"]);
+          if (flags["min-weight"]) opts.minWeight = Number(flags["min-weight"]);
+          if (flags["strategy"] === "communities") opts.strategy = "communities";
+          const r = Campaigns.derive(conn, opts);
+          process.stdout.write(
+            `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
+            `  edges          ${String(r.edges).padStart(6)}\n` +
+            (r.modularity !== null
+              ? `  modularity     ${r.modularity.toFixed(3).padStart(6)}  (Q; >0.3 is real structure)\n`
+              : "") +
+            `  sessions       ${String(r.sessions).padStart(6)}\n` +
+            `  projects new   ${String(r.projectsResolved).padStart(6)}\n` +
+            `  ephemeral cwds ${String(r.ephemeralSkipped).padStart(6)}  (not linked)\n` +
+            `  unattributed   ${String(r.unattributed).padStart(6)}  (no project touched)\n`,
+          );
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "label") {
+        const conn = init(db);
+        try {
+          const o: Labeling.LabelOptions = { relabel: flags["relabel"] === true };
+          if (flags["batch-size"]) o.batchSize = Number(flags["batch-size"]);
+          if (flags["max-batches"]) o.maxBatches = Number(flags["max-batches"]);
+          if (typeof flags["model"] === "string") o.model = flags["model"];
+          const r = Labeling.label(conn, o);
+          process.stdout.write(
+            `  considered     ${String(r.considered).padStart(6)}\n` +
+            `  labelled       ${String(r.labelled).padStart(6)}\n` +
+            `  batches        ${String(r.batches).padStart(6)}  model calls\n` +
+            `  no material    ${String(r.skippedNoMaterial).padStart(6)}  no prompt on any session\n`);
+          for (const f of r.failures) process.stdout.write(`  failed: ${f}\n`);
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "price") {
+        const conn = init(db);
+        try {
+          const r = Pricing.price(conn);
+          process.stdout.write(
+            `  priced         ${String(r.priced).padStart(6)}  rows given cost_est_usd\n` +
+            `  measured       ${String(r.alreadyMeasured).padStart(6)}  rows that already had cost_usd\n` +
+            `  unpriceable    ${String(r.unpriceable).padStart(6)}  no rate for the model\n` +
+            `  estimated      $${r.estimatedUsd.toFixed(2)}\n` +
+            `  measured       $${r.measuredUsd.toFixed(2)}  (provider-reported, for comparison)\n` +
+            `  rates taken    ${Pricing.RATES_TAKEN}, first-party list\n`);
+          for (const m of r.unknownModels) process.stdout.write(`  no rate: ${m}\n`);
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "harvest") {
+        const conn = init(db);
+        try {
+          const o: Artifacts.HarvestOptions = {};
+          if (flags["grace-days"]) o.graceDays = Number(flags["grace-days"]);
+          if (typeof flags["since"] === "string") o.since = flags["since"];
+          const r = Artifacts.harvest(conn, o);
+          process.stdout.write(
+            `  campaigns      ${String(r.campaigns).padStart(6)}\n` +
+            `  repos          ${String(r.repos).padStart(6)}\n` +
+            `  artifacts      ${String(r.artifacts).padStart(6)}\n` +
+            `    merged       ${String(r.merged).padStart(6)}\n` +
+            `    closed       ${String(r.closed).padStart(6)}  (abandoned)\n` +
+            `    open         ${String(r.open).padStart(6)}\n`);
+          for (const s2 of r.skipped) process.stdout.write(`  skipped ${s2}\n`);
+        } finally { conn.close(); }
+        return 0;
+      }
+      if (sub === "list") {
+        const conn = openForRead(db);
+        try {
+          const rows = conn.prepare(
+            "SELECT campaign_id, label, started_at, ended_at, session_count, " +
+            "project_count, input_tokens, output_tokens, cost_usd FROM campaigns " +
+            "ORDER BY started_at DESC",
+          ).all() as Array<Record<string, unknown>>;
+          for (const r of rows) {
+            const days = Math.max(1, Math.round(
+              (Date.parse(String(r["ended_at"])) - Date.parse(String(r["started_at"]))) / 86400000));
+            process.stdout.write(
+              `  ${String(r["started_at"]).slice(0, 10)}  ${String(days).padStart(2)}d  ` +
+              `${String(r["session_count"]).padStart(3)}s  ` +
+              `${String(r["project_count"]).padStart(2)}p  ` +
+              `${(Number(r["output_tokens"]) / 1000).toFixed(0).padStart(6)}k out  ` +
+              `${r["label"] ?? String(r["campaign_id"]).slice(0, 8)}\n`,
+            );
+          }
+          process.stdout.write(`\n  ${rows.length} campaigns\n`);
+        } finally { conn.close(); }
+        return 0;
+      }
+      process.stdout.write(`unknown: campaigns ${sub}\n`);
+      return 1;
     }
     case "mcp": {
       serveMcp(db);
