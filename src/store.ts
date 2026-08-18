@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export function defaultDbPath(): string {
   return process.env["CLAUDE_TELEMETRY_DB"]
@@ -92,6 +92,45 @@ const V3_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
   // weakness; the result being unattributable would be a worse one, so the
   // model that produced each label is recorded next to it.
   campaigns: [["label_model", "TEXT"]],
+};
+
+/**
+ * v4: what a workflow agent was *for*.
+ *
+ * Until now `agent_runs` only held agents spawned through a visible `Agent`
+ * tool call, because that call is what carries the spawn parameters. Workflow
+ * agents are spawned by the runtime, so they had no row at all -- they existed
+ * only as `api_requests` with an `agent_id` recovered from the transcript path.
+ *
+ * That was the largest blind spot in the store. Measured on this machine:
+ * workflow agents were 94% of all subagent spend ($2,395 of $2,548), and every
+ * dollar of it was unattributable to a task. Cost by *model* was answerable;
+ * cost by *what the agent was doing* was not, which is exactly the question a
+ * routing decision asks.
+ *
+ * The runtime does record it. Each run writes
+ * `<project>/<session>/workflows/<runId>.json`, whose `workflowProgress` array
+ * carries one `workflow_agent` entry per agent with the `label` the script
+ * passed, the resolved model, the phase, tokens, tool calls, retry count and
+ * queue timings. Nothing read that file. These columns are where it lands.
+ *
+ * `queued_ms` is the wait between being queued and starting -- the concurrency
+ * cap made visible. It is the difference between "this phase was slow" and
+ * "this phase was throttled", and the two want opposite fixes.
+ */
+const V4_COLUMNS: Record<string, Array<[name: string, decl: string]>> = {
+  agent_runs: [
+    ["phase", "TEXT"], ["phase_index", "INTEGER"], ["attempt", "INTEGER"],
+    ["queued_ms", "INTEGER"], ["prompt_preview", "TEXT"], ["result_preview", "TEXT"],
+  ],
+  // The run's own totals, as the runtime counted them. Kept beside the summed
+  // per-agent figures rather than replacing them: a disagreement between the
+  // two is a real signal (an agent whose transcript never landed), and merging
+  // them would hide it.
+  workflow_runs: [
+    ["default_model", "TEXT"], ["status", "TEXT"], ["agent_count", "INTEGER"],
+    ["total_tokens", "INTEGER"], ["total_tool_calls", "INTEGER"], ["duration_ms", "INTEGER"],
+  ],
 };
 
 const SCHEMA = `
@@ -455,7 +494,7 @@ function migrate(db: DatabaseSync): void {
   // Each version's map is applied in turn rather than merged: two versions can
   // add columns to the same table, and a spread would silently drop the older
   // entry when both name it.
-  for (const version of [V2_COLUMNS, V3_COLUMNS]) {
+  for (const version of [V2_COLUMNS, V3_COLUMNS, V4_COLUMNS]) {
     for (const [table, cols] of Object.entries(version)) {
       const have = columnsOf(db, table);
       for (const [name, decl] of cols) {

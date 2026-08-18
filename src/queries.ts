@@ -565,6 +565,69 @@ export function hookHealth(db: DatabaseSync, o: { since?: string | undefined; li
   };
 }
 
+/**
+ * What each *kind* of agent task costs, and on which model.
+ *
+ * The question a model-routing decision actually asks. Cost by model was always
+ * answerable; cost by *what the agent was doing* was not, because workflow
+ * agents -- the overwhelming majority of subagent spend -- had no row carrying
+ * their label. v4 imports that from the run manifest, and this is the read.
+ *
+ * Grouped by phase rather than by raw label by default: labels are per-item
+ * (`impl:T1` … `impl:T10`) and the routing decision is per-kind (everything in
+ * `Build` wants Opus; everything in `Review` may not). `groupBy: "label"` gives
+ * the finer cut when a single agent is the outlier.
+ *
+ * Cache reads are reported because they usually dominate. A research agent
+ * reads far more than it writes, so its bill tracks the *input* price -- which
+ * is the axis on which the cheaper models are cheaper, and the reason a
+ * read-heavy task is the best routing candidate even though it looks big.
+ */
+export function agentTasks(db: DatabaseSync, o: {
+  groupBy?: string | undefined; since?: string | undefined; limit?: number | undefined;
+} = {}) {
+  const key = o.groupBy === "label" ? "a.label"
+    : o.groupBy === "workflow" ? "w.name"
+    : o.groupBy === "model" ? "a.model"
+    : "COALESCE(a.phase, a.agent_type, '(none)')";
+  const where = ["a.agent_id IS NOT NULL"]; const params: unknown[] = [];
+  if (o.since) { where.push("a.ts >= ?"); params.push(o.since); }
+
+  const rows = all(db,
+    `SELECT ${key} AS task,` +
+    " count(DISTINCT a.agent_id) AS agents," +
+    " count(DISTINCT a.model) AS models," +
+    " group_concat(DISTINCT a.model) AS ran_on," +
+    " round(sum(r.cost_est_usd), 2) AS est_usd," +
+    " round(sum(r.cache_read) / 1000000.0, 0) AS cache_read_m," +
+    " round(sum(r.output_tokens) / 1000.0, 0) AS output_k," +
+    " round(sum(r.cache_read) * 1.0 / NULLIF(sum(r.output_tokens), 0), 0) AS read_write_ratio," +
+    // COUNT(DISTINCT agent_id), not SUM: these are agent-level fields being
+    // read across an agent→request join, so a plain SUM multiplies each by the
+    // agent's request count. The first run of this reported 770 retries across
+    // 31 agents.
+    " count(DISTINCT CASE WHEN a.attempt > 1 THEN a.agent_id END) AS retried," +
+    " round(max(a.queued_ms) / 1000.0, 0) AS worst_queue_s" +
+    " FROM agent_runs a" +
+    " LEFT JOIN api_requests r ON r.agent_id = a.agent_id" +
+    " LEFT JOIN workflow_runs w ON w.run_id = a.workflow_run_id" +
+    ` WHERE ${where.join(" AND ")} GROUP BY task` +
+    " ORDER BY est_usd DESC NULLS LAST", params, o.limit ?? 30);
+
+  return {
+    groupedBy: o.groupBy ?? "phase",
+    rows,
+    note:
+      "read_write_ratio is cache-read tokens per output token. A high ratio " +
+      "means the agent's bill is paid on the input side, where the cheaper " +
+      "models are cheapest -- those are the strongest candidates to move off " +
+      "Opus. A low ratio means it is generating, and downgrading costs quality " +
+      "for little saving. `retried` counts agents that ran more than once; a " +
+      "retry is paid twice, so a task that retries often may be a prompt " +
+      "problem rather than a model-price problem.",
+  };
+}
+
 export function sql(db: DatabaseSync, o: { query?: string | undefined; limit?: number | undefined }) {
   const q = o.query ?? "";
   if (!SELECT_ONLY.test(q) || FORBIDDEN.test(q) || q.includes(";")) {

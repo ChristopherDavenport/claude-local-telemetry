@@ -465,6 +465,163 @@ export function openingAsk(message: unknown): string | null {
   return null;
 }
 
+/**
+ * Import one workflow run manifest.
+ *
+ * `<project>/<session>/workflows/<runId>.json` is written by the workflow
+ * runtime and, until v4, read by nothing. It is the only place a workflow
+ * agent's *label* exists -- the transcript path yields an opaque agent id and
+ * the parent session has no `Agent` tool call to describe the spawn, because
+ * the runtime spawned it. Without this, workflow agents are cost with no task
+ * attached, which on this machine was 94% of subagent spend.
+ *
+ * Every field here is the runtime's own account of the run. Where it overlaps
+ * with what the transcripts already established, the transcript wins on
+ * identity (`agent_id`, timestamps) and this wins on intent (`label`, `model`,
+ * `phase`) -- see the COALESCE direction in the upserts.
+ */
+export function importWorkflowManifest(
+  db: DatabaseSync, path: string, dry: boolean,
+): { workflows: number; agents: number } {
+  let doc: Record<string, unknown>;
+  try {
+    doc = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    // A run still in flight can be mid-write. It will be picked up next pass.
+    return { workflows: 0, agents: 0 };
+  }
+
+  const runId = str(doc["runId"]);
+  if (!runId) return { workflows: 0, agents: 0 };
+
+  // The session that owns the run is the directory above `workflows/`, which is
+  // more reliable than anything inside the file: a resumed run keeps its
+  // original `taskId` but lands under whichever session resumed it.
+  const parts = path.split(sep);
+  const wi = parts.lastIndexOf("workflows");
+  const sessionId = wi > 0 ? (parts[wi - 1] ?? null) : null;
+
+  const startedMs = num(doc["startTime"]);
+  const ts = str(doc["timestamp"])
+    ?? (startedMs !== null ? new Date(startedMs).toISOString() : new Date(0).toISOString());
+
+  if (dry) {
+    const n = (doc["workflowProgress"] as unknown[] | undefined)?.length ?? 0;
+    return { workflows: 1, agents: n };
+  }
+
+  db.prepare(
+    "INSERT INTO workflow_runs (run_id, ts, name, session_id, script_path, summary, source," +
+    " default_model, status, agent_count, total_tokens, total_tool_calls, duration_ms)" +
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET" +
+    "  name             = COALESCE(excluded.name, workflow_runs.name)," +
+    "  session_id       = COALESCE(workflow_runs.session_id, excluded.session_id)," +
+    "  script_path      = COALESCE(excluded.script_path, workflow_runs.script_path)," +
+    "  summary          = COALESCE(excluded.summary, workflow_runs.summary)," +
+    "  default_model    = COALESCE(excluded.default_model, workflow_runs.default_model)," +
+    "  status           = COALESCE(excluded.status, workflow_runs.status)," +
+    "  agent_count      = COALESCE(excluded.agent_count, workflow_runs.agent_count)," +
+    "  total_tokens     = COALESCE(excluded.total_tokens, workflow_runs.total_tokens)," +
+    "  total_tool_calls = COALESCE(excluded.total_tool_calls, workflow_runs.total_tool_calls)," +
+    "  duration_ms      = COALESCE(excluded.duration_ms, workflow_runs.duration_ms)",
+  ).run(
+    runId, ts, str(doc["workflowName"]), sessionId, str(doc["scriptPath"]),
+    str(doc["summary"]), "manifest", str(doc["defaultModel"]), str(doc["status"]),
+    num(doc["agentCount"]), num(doc["totalTokens"]), num(doc["totalToolCalls"]),
+    num(doc["durationMs"]),
+  );
+
+  // COALESCE keeps whichever side knows a field: the manifest is authoritative
+  // for label/model/phase, the transcript for anything it already measured.
+  const insAgent = db.prepare(
+    "INSERT INTO agent_runs (agent_id, ts, parent_session_id, workflow_run_id," +
+    " agent_type, label, model, status, description, total_tokens, duration_ms," +
+    " tool_uses, source, phase, phase_index, attempt, queued_ms," +
+    " prompt_preview, result_preview) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)" +
+    " ON CONFLICT(agent_id) DO UPDATE SET" +
+    "  workflow_run_id = COALESCE(excluded.workflow_run_id, agent_runs.workflow_run_id)," +
+    "  label           = COALESCE(excluded.label, agent_runs.label)," +
+    "  model           = COALESCE(excluded.model, agent_runs.model)," +
+    "  status          = COALESCE(excluded.status, agent_runs.status)," +
+    "  total_tokens    = COALESCE(agent_runs.total_tokens, excluded.total_tokens)," +
+    "  duration_ms     = COALESCE(agent_runs.duration_ms, excluded.duration_ms)," +
+    "  tool_uses       = COALESCE(agent_runs.tool_uses, excluded.tool_uses)," +
+    "  phase           = COALESCE(excluded.phase, agent_runs.phase)," +
+    "  phase_index     = COALESCE(excluded.phase_index, agent_runs.phase_index)," +
+    "  attempt         = COALESCE(excluded.attempt, agent_runs.attempt)," +
+    "  queued_ms       = COALESCE(excluded.queued_ms, agent_runs.queued_ms)," +
+    "  prompt_preview  = COALESCE(excluded.prompt_preview, agent_runs.prompt_preview)," +
+    "  result_preview  = COALESCE(excluded.result_preview, agent_runs.result_preview)");
+
+  let agents = 0;
+  const progress = Array.isArray(doc["workflowProgress"]) ? doc["workflowProgress"] : [];
+  for (const raw of progress) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Record<string, unknown>;
+    if (e["type"] !== "workflow_agent") continue;
+    const agentId = str(e["agentId"]);
+    if (!agentId) continue;
+
+    const queued = num(e["queuedAt"]);
+    const started = num(e["startedAt"]);
+    // Only meaningful when both halves are present and ordered; a resumed run
+    // replays cached agents with a startedAt older than its queuedAt.
+    const queuedMs = queued !== null && started !== null && started >= queued
+      ? started - queued : null;
+
+    insAgent.run(
+      agentId,
+      started !== null ? new Date(started).toISOString() : ts,
+      sessionId,
+      runId,
+      "workflow-subagent",
+      str(e["label"]),
+      str(e["model"]),
+      str(e["state"]),
+      // `description` is the Agent tool's word for intent; for a workflow agent
+      // the label is the intent and the prompt is the detail, so the preview
+      // goes to its own column and description stays null rather than
+      // pretending to be something the parent declared.
+      null,
+      num(e["tokens"]),
+      num(e["durationMs"]),
+      num(e["toolCalls"]),
+      "manifest",
+      str(e["phaseTitle"]),
+      num(e["phaseIndex"]),
+      num(e["attempt"]),
+      queuedMs,
+      clip(str(e["promptPreview"]), 2000),
+      clip(str(e["resultPreview"]), 2000),
+    );
+    agents++;
+  }
+  return { workflows: 1, agents };
+}
+
+function clip(s: string | null, n: number): string | null {
+  return s === null ? null : (s.length > n ? s.slice(0, n) : s);
+}
+
+/** Every `<project>/<session>/workflows/<runId>.json` under a root. */
+export function findWorkflowManifests(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const e of entries) {
+      const p = join(dir, e);
+      let st;
+      try { st = statSync(p); } catch { continue; }
+      // `workflows/scripts/` holds the .js sources, not manifests.
+      if (st.isDirectory()) { if (e !== "scripts") walk(p); }
+      else if (e.startsWith("wf_") && e.endsWith(".json")) out.push(p);
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
 export interface BackfillOptions {
   root?: string | undefined; db?: string | undefined; since?: string | null; dryRun?: boolean | undefined; quiet?: boolean | undefined;
 }
@@ -495,7 +652,25 @@ export function backfill(opts: BackfillOptions = {}): BackfillCounts & { files: 
     total.agents += c.agents; total.workflows += c.workflows;
     if (!opts.quiet && ++i % 200 === 0) process.stderr.write(`  ${i}/${files.length} files…\n`);
   }
+
+  // After the transcripts, not before: the manifests upsert onto agent rows the
+  // transcripts may have created, and the COALESCE directions above assume the
+  // transcript's measured figures are already in place.
+  const manifests = findWorkflowManifests(root);
+  for (const m of manifests) {
+    try {
+      const c = importWorkflowManifest(db, m, opts.dryRun ?? false);
+      total.workflows += c.workflows;
+      total.agents += c.agents;
+    } catch (err) {
+      process.stderr.write(`  skipped ${m}: ${(err as Error).message}\n`);
+    }
+  }
+  if (!opts.quiet && manifests.length) {
+    process.stderr.write(`  ${manifests.length} workflow manifest(s)\n`);
+  }
+
   db.exec("COMMIT");
   db.close();
-  return { ...total, files: files.length };
+  return { ...total, files: files.length + manifests.length };
 }

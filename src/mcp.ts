@@ -161,6 +161,20 @@ export const TOOLS: Tool[] = [
     run: (db, a) => Q.workflowRun(db, { runId: a["run_id"] as string }),
   },
   {
+    name: "telemetry_agent_tasks",
+    description:
+      "What each kind of agent task costs and which model ran it — the read " +
+      "behind a model-routing decision. Group by phase (default), label, " +
+      "workflow or model. Reports cache-read vs output tokens, because a " +
+      "read-heavy task is billed on the input side where the cheaper models " +
+      "are cheapest, and is the strongest candidate to move off Opus.",
+    inputSchema: obj({ group_by: S, since: S, limit: I }),
+    run: (db, a) => Q.agentTasks(db, {
+      groupBy: a["group_by"] as string, since: a["since"] as string,
+      limit: a["limit"] as number,
+    }),
+  },
+  {
     name: "telemetry_agents",
     description:
       "Subagent runs with measured cost, from the transcripts each agent wrote. " +

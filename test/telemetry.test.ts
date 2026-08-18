@@ -570,3 +570,82 @@ test("the traces index lists roots, newest first", () => {
   assert.equal(empty.rows.length, 0);
   assert.match(empty.note ?? "", /only from the OTLP sink/);
 });
+
+test("a workflow manifest supplies the label and model its agents ran under", () => {
+  // The gap this closes: a workflow agent is spawned by the runtime, so the
+  // parent transcript has no Agent tool call describing it. Before v4 the only
+  // trace was an api_requests row with an opaque agent_id -- cost with no task
+  // attached, which was 94% of subagent spend on the machine this was written
+  // for. The runtime writes the label to the run manifest; nothing read it.
+  const root = join(work, "wf-root");
+  const sess = join(root, "-proj", "sess-1");
+  mkdirSync(join(sess, "workflows"), { recursive: true });
+  writeFileSync(join(sess, "workflows", "wf_abc123.json"), JSON.stringify({
+    runId: "wf_abc123",
+    timestamp: "2026-08-01T00:00:00Z",
+    workflowName: "demo",
+    summary: "a demo run",
+    scriptPath: "/tmp/demo.js",
+    defaultModel: "claude-opus-5[1m]",
+    status: "completed",
+    agentCount: 2,
+    totalTokens: 1234,
+    totalToolCalls: 7,
+    durationMs: 60000,
+    workflowProgress: [
+      { type: "workflow_phase", index: 1, title: "Survey" },
+      {
+        type: "workflow_agent", index: 1, label: "ground:api", phaseIndex: 1,
+        phaseTitle: "Survey", agentId: "ag-1", model: "claude-sonnet-5",
+        state: "done", queuedAt: 1000, startedAt: 3500, attempt: 1,
+        tokens: 900, toolCalls: 4, durationMs: 5000,
+        promptPreview: "survey the API", resultPreview: "{...}",
+      },
+      {
+        type: "workflow_agent", index: 2, label: "impl:T1", phaseIndex: 1,
+        phaseTitle: "Survey", agentId: "ag-2", model: "claude-opus-5",
+        state: "done", attempt: 2, tokens: 100, toolCalls: 1,
+      },
+    ],
+  }));
+
+  const dbPath = join(work, "wf.db");
+  backfill({ root, db: dbPath, quiet: true });
+  const d = openForRead(dbPath);
+
+  const rows = d.prepare(
+    "SELECT agent_id, label, model, phase, attempt, queued_ms, workflow_run_id," +
+    " total_tokens, tool_uses, prompt_preview FROM agent_runs ORDER BY agent_id",
+  ).all() as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.["label"], "ground:api");
+  assert.equal(rows[0]?.["model"], "claude-sonnet-5");
+  assert.equal(rows[0]?.["phase"], "Survey");
+  assert.equal(rows[0]?.["workflow_run_id"], "wf_abc123");
+  assert.equal(rows[0]?.["total_tokens"], 900);
+  assert.equal(rows[0]?.["tool_uses"], 4);
+  assert.equal(rows[0]?.["prompt_preview"], "survey the API");
+  // startedAt - queuedAt, so a phase that was throttled is distinguishable
+  // from a phase that was merely slow.
+  assert.equal(rows[0]?.["queued_ms"], 2500);
+  // A retry is paid twice; the count has to survive or the cost of a flaky
+  // prompt reads as the cost of the model.
+  assert.equal(rows[1]?.["attempt"], 2);
+  // Absent timings must not become a bogus zero.
+  assert.equal(rows[1]?.["queued_ms"], null);
+
+  const wf = d.prepare("SELECT * FROM workflow_runs WHERE run_id='wf_abc123'")
+    .get() as Record<string, unknown>;
+  assert.equal(wf["default_model"], "claude-opus-5[1m]");
+  assert.equal(wf["agent_count"], 2);
+  assert.equal(wf["total_tool_calls"], 7);
+
+  // And the read that motivated all of it: cost per kind of task.
+  const t = Q.agentTasks(d, {});
+  assert.equal(t.groupedBy, "phase");
+  assert.equal(t.rows[0]?.["task"], "Survey");
+  assert.equal(t.rows[0]?.["agents"], 2);
+  const byLabel = Q.agentTasks(d, { groupBy: "label" });
+  assert.deepEqual(byLabel.rows.map((r) => r["task"]).sort(), ["ground:api", "impl:T1"]);
+  d.close();
+});
