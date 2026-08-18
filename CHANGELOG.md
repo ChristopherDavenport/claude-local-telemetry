@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.0 — 2026-08-18
+
+Cost by model was answerable; cost by *what an agent was doing* was not. That is
+the question a model-routing decision asks, and the gap was almost all of the
+money — workflow agents were 94% of subagent spend on the store this was
+measured against, and had no `agent_runs` row at all.
+
+- **Workflow agents get a task, not just a cost.** `agent_runs` is built from
+  the parent's `Agent` tool call, which carries the spawn parameters. A workflow
+  agent is spawned by the runtime, so there is no such call, and the importer
+  said so — it passed `null` for `workflow_run_id` with a comment explaining
+  why. Those agents existed only as `api_requests` rows with an `agent_id`
+  recovered from the transcript path. The runtime does record the intent, in
+  `<project>/<session>/workflows/<runId>.json`, whose `workflowProgress` array
+  carries the label the script passed, the resolved model, the phase, tokens,
+  tool calls, retry count and queue timings. Nothing read that file. Backfill
+  now does, after the transcripts, so the manifest upserts onto rows they
+  already established: transcript wins on identity and measured totals, manifest
+  wins on intent. On the store this was written against, `agent_runs` went from
+  200 rows to 599, of which 399 gained a label and phase they never had.
+- **New read: `telemetry_agent_tasks`** (`agentTasks()`), grouped by phase,
+  label, workflow or model. It reports cache-read against output tokens, because
+  that ratio is the routing signal rather than a curiosity: every phase measured
+  reads 500–1400 tokens per token written, so these bills are paid on the input
+  side, which is the axis the cheaper models are cheaper on. It also surfaces
+  retries — a retry is paid twice, so a task that retries often is a prompt
+  problem wearing a model-price costume — and the worst queue wait, which
+  separates a phase that was slow from one that was throttled.
+
+**Schema v4.** `agent_runs` gains `phase`, `phase_index`, `attempt`,
+`queued_ms`, `prompt_preview` and `result_preview`; `workflow_runs` gains the
+run's own totals, kept beside the summed per-agent figures rather than replacing
+them — a disagreement between the two means an agent whose transcript never
+landed, and merging would hide it.
+
+**Upgrading.** A 0.2.x store is v3 and read-only callers refuse it until the
+columns exist. The launchd sink opens through `init()` and migrates it on its
+next export, so in the normal setup this resolves itself; otherwise the refusal
+names the exact command (`claude-local-telemetry init --db <path>`, idempotent).
+Re-run `backfill` afterwards to populate the new columns from manifests already
+on disk.
+
 ## 0.2.1 — 2026-08-17
 
 Two defects in 0.2.0, both found by running the acceptance tests against a real
